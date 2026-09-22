@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Effects
+import QtQuick.Shapes
 import qs.Commons
 import qs.Ui
 
@@ -62,7 +63,7 @@ Item {
     if (matched) return "Unlocking…"
     if (faceState === "no_profile") return "Open FaceCam Lock to enroll, or type your password"
     if (faceFailed) return "Tap the camera to try again, or type your password"
-    if (scanning && !frameReady) return "Starting camera…"
+    if (scanning && (!frameReady || awaitingFrame)) return "Starting camera…"
     if (scanning && faceAttempt > 1) return "Attempt " + faceAttempt + " of " + faceMaxAttempts
     return "Hold still and look at the screen"
   }
@@ -119,6 +120,9 @@ Item {
   // over once Ready, so the preview never blanks between frames.
   property int shownBuffer: 0
   property bool frameReady: false
+  // True from the moment a scan (re)starts until its first fresh frame lands.
+  property bool awaitingFrame: false
+  property bool wasScanning: false
 
   function loadNextFrame() {
     var url = previewUrl()
@@ -129,6 +133,7 @@ Item {
   }
 
   function onBufferReady(index) {
+    awaitingFrame = false
     if (index === shownBuffer) return
     shownBuffer = index
     frameReady = true
@@ -141,6 +146,13 @@ Item {
       previewB.source = ""
       frameReady = false
     }
+    if (scanning && !wasScanning) awaitingFrame = true
+    if (!scanning) awaitingFrame = false
+    wasScanning = scanning
+  }
+
+  function clockText(now) {
+    return Qt.formatTime(now, "hh") + "<font color='" + accentColor + "'>:</font>" + Qt.formatTime(now, "mm")
   }
 
   function forcePasswordFocus() {
@@ -234,7 +246,8 @@ Item {
         Text {
           id: clockLabel
           anchors.horizontalCenter: parent.horizontalCenter
-          text: Qt.formatTime(new Date(), "hh:mm")
+          textFormat: Text.StyledText
+          text: root.clockText(new Date())
           color: Color.lock.text
           font.family: Style.font.family
           font.pixelSize: Math.round(Style.font.heading * 3.4)
@@ -251,7 +264,30 @@ Item {
         }
       }
 
-      Item { width: 1; height: Style.space(6) }
+      Item { width: 1; height: Style.space(4) }
+
+      // Frosted card in the theme's lock colours; corners follow the theme radius.
+      BorderSurface {
+        id: card
+        anchors.horizontalCenter: parent.horizontalCenter
+        readonly property int pad: Style.space(26)
+        width: Math.max(root.fieldWidth, cameraFrame.boxSize + Style.space(24)) + pad * 2
+        height: cardContent.implicitHeight + pad * 2
+        radius: Style.cornerRadius
+        color: Color.lock.background
+        borderSpec: Border.flat(Util.alpha(Color.lock.text, 0.1), 1)
+        clip: true
+        Behavior on height {
+          enabled: root.animate
+          NumberAnimation { duration: 200; easing.type: Easing.OutCubic }
+        }
+
+        Column {
+          id: cardContent
+          x: card.pad
+          y: card.pad
+          width: card.width - card.pad * 2
+          spacing: Style.space(14)
 
       // ---------------------------------------------------------------- camera stage
       Item {
@@ -263,7 +299,10 @@ Item {
           var preferred = Style.space(220)
           return Math.max(Style.space(156), Math.min(preferred, maxByHeight, maxByWidth))
         }
-        readonly property int boxRadius: Math.round(boxSize * 0.2)
+        // Follow the theme's corner radius; sharp themes get a barely-rounded frame.
+        readonly property int boxRadius: Style.cornerRadius > 0
+          ? Math.min(Math.round(boxSize * 0.22), Style.cornerRadius * 3)
+          : Math.round(boxSize * 0.05)
         readonly property int innerPad: 3
         readonly property int innerSize: Math.max(1, boxSize - innerPad * 2)
         readonly property int innerRadius: Math.max(1, boxRadius - innerPad)
@@ -369,7 +408,7 @@ Item {
           // static image, so the blur is rendered once, not per frame.
           MultiEffect {
             anchors.fill: parent
-            visible: root.faceFailed && root.frameReady
+            visible: (root.faceFailed || root.awaitingFrame) && root.frameReady
             source: root.shownBuffer === 0 ? previewA : previewB
             autoPaddingEnabled: false
             blurEnabled: true
@@ -382,7 +421,7 @@ Item {
           Rectangle {
             anchors.fill: parent
             color: Color.background
-            opacity: root.faceFailed ? (root.frameReady ? 0.25 : 0.6) : 0
+            opacity: root.faceFailed ? (root.frameReady ? 0.25 : 0.6) : (root.awaitingFrame && root.frameReady ? 0.3 : 0)
             Behavior on opacity { NumberAnimation { duration: 220 } }
           }
 
@@ -391,7 +430,7 @@ Item {
             id: sweep
             width: parent.width
             height: Math.round(parent.height * 0.28)
-            visible: root.scanning && root.frameReady
+            visible: root.scanning && root.frameReady && !root.awaitingFrame
             gradient: Gradient {
               GradientStop { position: 0.0; color: "transparent" }
               GradientStop { position: 0.5; color: Util.alpha(root.accentColor, 0.2) }
@@ -441,16 +480,46 @@ Item {
           }
         }
 
-        // Starting camera: gently pulsing camera glyph.
+        // Starting camera: an accent arc spins around the camera glyph. The
+        // RotationAnimator runs on the render thread, so it costs nothing on the UI thread.
+        Item {
+          id: spinner
+          anchors.centerIn: parent
+          width: Math.round(cameraFrame.boxSize * 0.34)
+          height: width
+          visible: root.scanning && (!root.frameReady || root.awaitingFrame)
+          Shape {
+            anchors.fill: parent
+            preferredRendererType: Shape.CurveRenderer
+            ShapePath {
+              strokeColor: Util.alpha(root.accentColor, 0.18)
+              strokeWidth: 3
+              fillColor: "transparent"
+              PathAngleArc { centerX: spinner.width / 2; centerY: spinner.height / 2; radiusX: spinner.width / 2 - 2; radiusY: radiusX; startAngle: 0; sweepAngle: 360 }
+            }
+            ShapePath {
+              strokeColor: root.accentColor
+              strokeWidth: 3
+              capStyle: ShapePath.RoundCap
+              fillColor: "transparent"
+              PathAngleArc { centerX: spinner.width / 2; centerY: spinner.height / 2; radiusX: spinner.width / 2 - 2; radiusY: radiusX; startAngle: -90; sweepAngle: 100 }
+            }
+            RotationAnimator on rotation {
+              running: spinner.visible && root.animate
+              from: 0; to: 360; duration: 900; loops: Animation.Infinite
+            }
+          }
+        }
+
         Text {
           anchors.centerIn: parent
-          visible: root.scanning && !root.frameReady
+          visible: spinner.visible
           text: "󰄀"
           color: root.accentColor
           font.family: Style.font.family
           font.pixelSize: Math.round(cameraFrame.boxSize * 0.18)
           SequentialAnimation on opacity {
-            running: parent.visible && root.animate
+            running: spinner.visible && root.animate
             loops: Animation.Infinite
             NumberAnimation { from: 0.9; to: 0.35; duration: 900; easing.type: Easing.InOutSine }
             NumberAnimation { from: 0.35; to: 0.9; duration: 900; easing.type: Easing.InOutSine }
@@ -517,14 +586,14 @@ Item {
           }
         }
 
-        // Frame outline.
-        Rectangle {
+        // Frame outline: the theme's Hyprland active-window border while scanning.
+        BorderSurface {
           anchors.fill: parent
           radius: cameraFrame.boxRadius
           color: "transparent"
-          border.width: root.matched ? 3 : 2
-          border.color: root.matched ? root.accentColor : (root.faceFailed ? root.softError : Util.alpha(root.accentColor, 0.7))
-          Behavior on border.color { ColorAnimation { duration: 220 } }
+          borderSpec: root.matched ? Border.flat(root.accentColor, 3)
+            : root.faceFailed ? Border.flat(root.softError, 2)
+            : Border.hyprlandActiveSpec(root.accentColor, 2)
         }
 
         // Check badge on a match.
@@ -562,7 +631,7 @@ Item {
       // ---------------------------------------------------------------- status
       Column {
         anchors.horizontalCenter: parent.horizontalCenter
-        width: parent.width - Style.space(40)
+        width: parent.width
         spacing: Style.space(4)
         // Keeps text legible over bright wallpapers; re-rendered only when text changes.
         layer.enabled: root.animate
@@ -580,7 +649,7 @@ Item {
           width: parent.width
           horizontalAlignment: Text.AlignHCenter
           wrapMode: Text.WordWrap
-          text: root.statusLine + (root.scanning && root.frameReady ? dots.text : "")
+          text: root.statusLine + (root.scanning && root.frameReady && !root.awaitingFrame ? dots.text : "")
           color: root.matched ? root.accentColor : Color.lock.text
           font.family: Style.font.family
           font.pixelSize: root.matched ? Math.round(Style.font.heading * 1.35) : Math.round(Style.font.heading * 1.05)
@@ -692,6 +761,8 @@ Item {
           }
         }
       }
+        }
+      }
     }
 
     Button {
@@ -717,7 +788,7 @@ Item {
     running: root.loadBackground
     onTriggered: {
       var now = new Date()
-      clockLabel.text = Qt.formatTime(now, "hh:mm")
+      clockLabel.text = root.clockText(now)
       dateLabel.text = Qt.formatDate(now, "dddd, MMMM d")
     }
   }

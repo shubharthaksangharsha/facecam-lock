@@ -136,6 +136,7 @@ class Scanner:
         self.lock = threading.Lock()
         self.thread = None
         self.cancel = threading.Event()
+        self.release_timer = None
         self._warm_up()
 
     def _warm_up(self):
@@ -155,13 +156,17 @@ class Scanner:
             if self.scanning and not force:
                 self.hub.broadcast(self.hub.last_status)
                 return
-            self._cancel_locked()
+            self._cancel_release_timer()
+            if self.scanning:
+                self._cancel_locked()
+            # A camera still warm from a failed scan is reused as-is: no 0.7 s start.
             self.cancel = threading.Event()
             self.thread = threading.Thread(target=self._run, args=(self.cancel,), daemon=True)
             self.thread.start()
 
     def stop(self):
         with self.lock:
+            self._cancel_release_timer()
             self._cancel_locked()
         self.hub.status(state="idle", message="")
 
@@ -170,6 +175,24 @@ class Scanner:
         if self.thread and self.thread.is_alive() and self.thread is not threading.current_thread():
             self.thread.join(timeout=1.5)
         self.camera.stop(force=True)
+
+    def _cancel_release_timer(self):
+        if self.release_timer is not None:
+            self.release_timer.cancel()
+            self.release_timer = None
+
+    def _schedule_release(self, seconds: float):
+        """Keep the camera on briefly after a failed scan so "try again" starts instantly."""
+        def release():
+            with self.lock:
+                if not self.scanning:
+                    self.camera.stop(force=True)
+                self.release_timer = None
+        with self.lock:
+            self._cancel_release_timer()
+            self.release_timer = threading.Timer(seconds, release)
+            self.release_timer.daemon = True
+            self.release_timer.start()
 
     def _open_camera(self, index: int) -> bool:
         if self.camera.start(device_index=index):
@@ -185,34 +208,40 @@ class Scanner:
         return self.camera.start(device_index=index)
 
     def _run(self, cancel: threading.Event):
+        result = None
         try:
-            self._scan(cancel)
+            result = self._scan(cancel)
         except Exception as e:
             log(f"scan crashed: {e!r}")
             self.hub.status(state="failed", message="Can't detect face", require_password=True)
         finally:
-            self.camera.stop(force=True)
+            linger = float(self.storage.get_settings().get("camera_linger_sec", 8))
+            if result == "failed" and linger > 0 and not cancel.is_set() and not lid_closed():
+                self._schedule_release(linger)
+            else:
+                self.camera.stop(force=True)
 
     def _scan(self, cancel: threading.Event):
         storage = self.storage
         settings = storage.get_settings()
-        profile = storage.get_profile()
-        name = storage.get_display_name(profile)
+        people = storage.list_people()
+        owner = people[0] if people and people[0]["id"] == "owner" else None
+        name = owner["display_name"] if owner else ""
         max_attempts = max(1, int(settings.get("max_attempts", 3)))
         timeout = max(0.5, float(settings.get("attempt_timeout_sec", 2.2)))
         threshold = float(settings.get("threshold", 0.38))
         cam_idx = int(settings.get("camera_index", 0))
         base = {"display_name": name, "max_attempts": max_attempts}
-        if profile and storage.has_avatar():
+        if owner and owner["avatar"]:
             # Sent up front so the lock screen can decode it before a match.
-            base["avatar"] = str(storage.avatar_path)
+            base["avatar"] = owner["avatar"]
 
         try:
             TOKEN_PATH.unlink()
         except FileNotFoundError:
             pass
 
-        if not profile or not settings.get("enable_face_unlock", True):
+        if not people or not settings.get("enable_face_unlock", True):
             self.hub.status(state="no_profile", message="Can't detect face", require_password=True, **base)
             return
 
@@ -277,16 +306,19 @@ class Scanner:
                         raw = scale_raw_face(faces[0]["raw"], factor)
                         try:
                             feature = self.recognizer.extract_feature(frame, raw)
-                            matched, score = self.recognizer.match_against_profile(feature, profile, threshold)
+                            matched, score, person = self.recognizer.match_people(feature, people, threshold)
                         except cv2.error:
-                            matched, score = False, -1.0
+                            matched, score, person = False, -1.0, None
                         if matched:
-                            log(f"match score={score:.3f} after {(time.perf_counter() - t_open) * 1000:.0f} ms")
+                            who = person["display_name"]
+                            log(f"match {person['id']} score={score:.3f} after {(time.perf_counter() - t_open) * 1000:.0f} ms")
                             self.camera.stop(force=True)
-                            self.hub.status(state="matched", message=f"Welcome back {name}",
-                                            score=round(score, 4), **base)
+                            # Each person's photo is shown only for that person.
+                            self.hub.status(**{**base, "state": "matched", "message": f"Welcome back {who}",
+                                               "display_name": who, "person": person["id"],
+                                               "avatar": person["avatar"] or "", "score": round(score, 4)})
                             write_atomic(TOKEN_PATH, f"{secrets.token_hex(16)} {time.time():.3f}\n".encode())
-                            return
+                            return "matched"
 
                 if deadline is not None and now > deadline:
                     if attempt < max_attempts:
@@ -295,10 +327,9 @@ class Scanner:
                         self.hub.status(state="scanning", attempt=attempt,
                                         message=f"Scanning face… ({attempt}/{max_attempts})", **base)
                     else:
-                        self.camera.stop(force=True)
                         self.hub.status(state="failed", message="Can't detect face",
                                         require_password=True, **base)
-                        return
+                        return "failed"
 
             if not restart:
                 return

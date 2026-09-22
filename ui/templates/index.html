@@ -102,6 +102,11 @@
             <button id="changePhotoBtn" class="btn-ghost shrink-0 px-3 py-1.5 text-xs">Change</button>
             <input id="photoInput" type="file" accept="image/*" class="hidden" />
           </div>
+          <div id="peopleSection" class="mt-4 hidden">
+            <p class="label mb-2">Also unlocks for</p>
+            <ul id="peopleList" class="flex flex-col gap-2"></ul>
+            <p class="mt-2 text-[11px] text-muted">Add someone: <code class="text-fg">facecam-lock person add --name NAME --live</code></p>
+          </div>
           <div class="mt-4 flex items-center justify-between border-t border-line/60 pt-4">
             <button id="reEnrollBtn" class="btn-ghost px-3 py-1.5 text-xs">Retrain face</button>
             <button id="deleteProfileBtn" class="btn-danger px-3 py-1.5 text-xs">Delete profile</button>

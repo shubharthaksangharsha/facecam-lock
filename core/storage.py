@@ -9,8 +9,9 @@ import hmac
 import json
 import os
 import pwd
+import re
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 
 import cv2
 import numpy as np
@@ -62,6 +63,7 @@ class StorageManager:
         self.settings_path = self.config_dir / "config.json"
         self._profile_cache: Optional[Dict[str, Any]] = None
         self._profile_mtime: Optional[float] = None
+        self._people_cache: Dict[str, Any] = {}
 
     def get_settings(self) -> Dict[str, Any]:
         merged = dict(DEFAULT_SETTINGS)
@@ -171,6 +173,78 @@ class StorageManager:
         except Exception as e:
             print(f"[Storage] Error deleting profile: {e}")
             return False
+
+    # ------------------------------------------------------------ extra people
+    # The owner lives in profile.json (the PAM hook checks for that file). Anyone
+    # else who may unlock this session lives in people/<id>.json with an optional
+    # people/<id>.jpg welcome photo that is only shown when that face matches.
+
+    @property
+    def people_dir(self) -> Path:
+        return self.config_dir / "people"
+
+    def list_people(self) -> List[Dict[str, Any]]:
+        """Everyone who can unlock: owner first. Each entry: id, display_name, profile, avatar."""
+        people = []
+        owner = self.get_profile()
+        if owner:
+            people.append({
+                "id": "owner",
+                "display_name": self.get_display_name(owner),
+                "profile": owner,
+                "avatar": str(self.avatar_path) if self.has_avatar() else None,
+            })
+        if self.people_dir.is_dir():
+            for path in sorted(self.people_dir.glob("*.json")):
+                try:
+                    mtime = path.stat().st_mtime
+                    cached = self._people_cache.get(path.name)
+                    if cached and cached[0] == mtime:
+                        profile = cached[1]
+                    else:
+                        with open(path, "r", encoding="utf-8") as f:
+                            profile = json.load(f)
+                        self._people_cache[path.name] = (mtime, profile)
+                except (OSError, ValueError) as e:
+                    print(f"[Storage] Skipping {path.name}: {e}")
+                    continue
+                avatar = path.with_suffix(".jpg")
+                people.append({
+                    "id": path.stem,
+                    "display_name": profile.get("display_name") or path.stem.capitalize(),
+                    "profile": profile,
+                    "avatar": str(avatar) if avatar.exists() else None,
+                })
+        return people
+
+    def save_person(self, person_id: str, profile: Dict[str, Any], avatar_jpeg: Optional[bytes] = None) -> Path:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", person_id) or person_id == "owner":
+            raise ValueError("Person id must be lowercase letters, digits, - or _")
+        self.people_dir.mkdir(mode=0o700, exist_ok=True)
+        target = self.people_dir / f"{person_id}.json"
+        self._write_private(target, json.dumps(profile).encode())
+        if avatar_jpeg:
+            self._write_private(target.with_suffix(".jpg"), avatar_jpeg)
+        return target
+
+    def delete_person(self, person_id: str) -> bool:
+        target = self.people_dir / f"{person_id}.json"
+        if person_id == "owner" or not target.exists():
+            return False
+        target.unlink()
+        target.with_suffix(".jpg").unlink(missing_ok=True)
+        self._people_cache.pop(target.name, None)
+        return True
+
+    @staticmethod
+    def _write_private(path: Path, data: bytes) -> None:
+        tmp = path.with_name(path.name + ".tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        os.replace(tmp, path)
 
     @staticmethod
     def frame_to_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:

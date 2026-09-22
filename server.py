@@ -313,6 +313,22 @@ def save_enrollment(payload: EnrollSaveRequest):
     return {"status": "ok", "display_name": display_name, "sample_count": len(payload.samples)}
 
 
+@app.get("/api/people")
+def list_people():
+    """Everyone besides the owner who can unlock this session."""
+    return [{"id": p["id"], "display_name": p["display_name"],
+             "samples": len(p["profile"].get("exemplars", [])), "has_photo": bool(p["avatar"])}
+            for p in storage.list_people() if p["id"] != "owner"]
+
+
+@app.post("/api/people/{person_id}/delete")
+def remove_person(person_id: str, payload: StudioPasswordRequest):
+    _require_studio_password(payload.password)
+    if not storage.delete_person(person_id):
+        raise HTTPException(status_code=404, detail="No such person")
+    return {"status": "ok"}
+
+
 @app.get("/api/profile/photo")
 def get_profile_photo():
     if not storage.has_avatar():
@@ -406,11 +422,12 @@ def _pack(header: Dict[str, Any], jpeg: bytes) -> bytes:
 class FrameAnalyzer:
     """Per-connection state for the studio stream (runs in a worker thread)."""
 
-    def __init__(self, profile, threshold: float):
-        self.profile = profile
+    def __init__(self, people, threshold: float):
+        self.people = people
         self.threshold = threshold
         self.tick = 0
         self.last_similarity = None
+        self.last_name = None
 
     def process(self, frame: np.ndarray) -> bytes:
         self.tick += 1
@@ -421,28 +438,32 @@ class FrameAnalyzer:
 
         faces_out = []
         best = None
+        best_name = None
         for face in detector.detect(small, compute_quality=False)[:3]:
             box = [round(v * to_view) for v in face["box"]]
             landmarks = [[round(x * to_view), round(y * to_view)] for x, y in face["landmarks"]]
             item = {"box": box, "score": round(face["score"], 3), "landmarks": landmarks}
             # Recognition every other frame keeps the stream at full rate.
-            if self.profile and self.tick % 2 == 0:
+            if self.people and self.tick % 2 == 0:
                 try:
                     feature = recognizer.extract_feature(frame, scale_raw_face(face["raw"], to_full))
-                    _, sim = recognizer.match_against_profile(feature, self.profile, self.threshold)
-                    best = sim if best is None else max(best, sim)
+                    _, sim, person = recognizer.match_people(feature, self.people, self.threshold)
+                    if best is None or sim > best:
+                        best, best_name = sim, person["display_name"]
                 except cv2.error:
                     pass
             faces_out.append(item)
 
-        if self.profile and self.tick % 2 == 0:
+        if self.people and self.tick % 2 == 0:
             self.last_similarity = best
+            self.last_name = best_name if best is not None else None
         elif not faces_out:
             self.last_similarity = None
 
         header = {
             "faces": faces_out,
             "best_similarity": None if self.last_similarity is None else round(self.last_similarity, 4),
+            "name": self.last_name,
             "threshold": self.threshold,
             "w": view.shape[1],
             "h": view.shape[0],
@@ -459,7 +480,7 @@ async def websocket_stream(websocket: WebSocket):
         await websocket.close()
         return
 
-    analyzer = FrameAnalyzer(storage.get_profile(), float(settings.get("threshold", 0.38)))
+    analyzer = FrameAnalyzer(storage.list_people(), float(settings.get("threshold", 0.38)))
     min_interval = 1.0 / STREAM_FPS - 0.005
     seq = 0
     last = 0.0

@@ -24,7 +24,28 @@ once your face is recognised, and never appears for anyone else:
 facecam-lock photo ~/Pictures/me.jpg   # cropped around your face, kept in ~/.config/facecam-lock (0600)
 ```
 
-(or use **Welcome photo → Change** in the Face Studio). Preview any lock state
+(or use **Welcome photo → Change** in the Face Studio).
+
+**Let someone else unlock** (partner, family), each greeted by their own name and photo.
+Their photo is only ever shown when *their* face matches:
+
+```bash
+facecam-lock person add --name "Pranchu" --live --photo ~/Pictures/her.jpg   # she sits in front of the camera
+facecam-lock person add --name "Pranchu" --photos ~/Pictures/her-photos       # or from photos she shared
+facecam-lock person list
+facecam-lock person remove pranchu
+```
+
+Photos with several people are fine: faces that already belong to an enrolled
+person are skipped, and samples that disagree with the rest are dropped.
+
+The lock screen follows your Omarchy theme: its lock colours, corner radius,
+accent, and the Hyprland active-window border (gradients included) are used for the
+card and the camera frame. After a failed scan the camera stays warm for 8 s
+(`camera_linger_sec` in `~/.config/facecam-lock/config.json`), so **Tap to try
+again** starts instantly.
+
+Preview any lock state
 without locking: `omarchy-shell lock previewFace matched|failed|scanning`, then
 `omarchy-shell lock hidePreview`.
 

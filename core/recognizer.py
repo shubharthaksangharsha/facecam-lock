@@ -30,6 +30,9 @@ class FaceRecognizer:
         self._lock = threading.Lock()
         self._matrix_key = None
         self._matrix: Optional[np.ndarray] = None
+        self._people_key = None
+        self._people_matrix = np.zeros((0, 128), np.float32)
+        self._people_owner = np.zeros(0, np.int32)
 
     def align_and_crop(self, frame: np.ndarray, raw_face: np.ndarray) -> np.ndarray:
         return self.recognizer.alignCrop(frame, raw_face)
@@ -76,6 +79,45 @@ class FaceRecognizer:
             return False, -1.0
         best = float(np.max(matrix @ _unit(candidate_feature.ravel().astype(np.float32))))
         return best >= threshold, best
+
+    def match_people(
+        self,
+        candidate_feature: np.ndarray,
+        people: List[Dict[str, Any]],
+        threshold: Optional[float] = None,
+    ) -> Tuple[bool, float, Optional[Dict[str, Any]]]:
+        """Best match across every enrolled person (entries from StorageManager.list_people)."""
+        if threshold is None:
+            threshold = self.default_threshold
+        key = tuple((p["id"], p["profile"].get("created_at"), p["profile"].get("sample_count")) for p in people)
+        if key != self._people_key:
+            rows, owners = [], []
+            for index, person in enumerate(people):
+                matrix = self._rows(person["profile"])
+                rows.append(matrix)
+                owners.extend([index] * matrix.shape[0])
+            self._people_matrix = np.vstack(rows) if rows else np.zeros((0, 128), np.float32)
+            self._people_owner = np.asarray(owners, dtype=np.int32)
+            self._people_key = key
+        if self._people_matrix.shape[0] == 0:
+            return False, -1.0, None
+        scores = self._people_matrix @ _unit(candidate_feature.ravel().astype(np.float32))
+        best_row = int(np.argmax(scores))
+        best = float(scores[best_row])
+        person = people[int(self._people_owner[best_row])]
+        return best >= threshold, best, person
+
+    @staticmethod
+    def _rows(profile: Dict[str, Any]) -> np.ndarray:
+        rows = []
+        if profile.get("centroid") is not None:
+            rows.append(np.asarray(profile["centroid"], dtype=np.float32))
+        for ex in profile.get("exemplars", []):
+            rows.append(np.asarray(ex["embedding"], dtype=np.float32))
+        if not rows:
+            return np.zeros((0, 128), dtype=np.float32)
+        matrix = np.vstack(rows)
+        return (matrix / np.maximum(np.linalg.norm(matrix, axis=1, keepdims=True), 1e-6)).astype(np.float32)
 
     @staticmethod
     def calculate_centroid(embeddings: List[np.ndarray]) -> np.ndarray:

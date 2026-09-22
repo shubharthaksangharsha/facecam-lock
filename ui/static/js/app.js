@@ -189,7 +189,8 @@ function cssColor(token, alpha = 1) {
   return `rgb(${rgb} / ${alpha})`;
 }
 
-function drawHUD({ faces = [], best_similarity: sim, threshold = 0.38 }) {
+function drawHUD(header) {
+  const { faces = [], best_similarity: sim, threshold = 0.38 } = header;
   const w = canvas.width;
   const matched = sim !== null && sim !== undefined && sim >= threshold;
   const color = matched ? cssColor("ok") : sim != null ? cssColor("warn") : cssColor("accent");
@@ -214,7 +215,7 @@ function drawHUD({ faces = [], best_similarity: sim, threshold = 0.38 }) {
       ctx.fill();
     }
 
-    const label = matched ? `${state.profile?.display_name || "You"} · ${Math.round(sim * 100)}%`
+    const label = matched ? `${header.name || state.profile?.display_name || "You"} · ${Math.round(sim * 100)}%`
       : sim != null ? `Match ${Math.round(sim * 100)}%` : `Face ${Math.round(face.score * 100)}%`;
     ctx.font = "600 11px 'JetBrainsMono Nerd Font', monospace";
     const tw = ctx.measureText(label).width + 12;
@@ -257,11 +258,51 @@ function setCameraPill(on) {
 /* ---------- profile ---------- */
 
 async function loadStatus() {
-  const data = await api("/api/status");
+  const [data, people] = await Promise.all([api("/api/status"), api("/api/people").catch(() => [])]);
   state.profile = data.profile;
   state.settings = data.settings;
+  state.people = people;
   renderProfile();
+  renderPeople();
   populateSettings();
+}
+
+function renderPeople() {
+  const people = state.people || [];
+  $("peopleSection").classList.toggle("hidden", people.length === 0);
+  $("peopleList").replaceChildren(...people.map((person) => {
+    const li = document.createElement("li");
+    li.className = "flex items-center justify-between rounded-lg border border-line/60 bg-bg-deep/40 px-3 py-2";
+    const info = document.createElement("span");
+    info.className = "text-sm";
+    info.textContent = person.display_name;
+    const meta = document.createElement("span");
+    meta.className = "ml-2 font-mono text-[11px] text-muted";
+    meta.textContent = `${person.samples} samples${person.has_photo ? " · photo" : ""}`;
+    info.appendChild(meta);
+    const remove = document.createElement("button");
+    remove.className = "text-xs text-bad hover:underline";
+    remove.textContent = "Remove";
+    remove.onclick = () => {
+      state.pendingPerson = person;
+      state.studioPassword ? removePerson() : requestStudioPassword("remove-person");
+    };
+    li.append(info, remove);
+    return li;
+  }));
+}
+
+async function removePerson() {
+  const person = state.pendingPerson;
+  state.pendingPerson = null;
+  if (!person || !(await confirmDialog(`Stop ${person.display_name} from unlocking this laptop?`))) return;
+  try {
+    await api(`/api/people/${encodeURIComponent(person.id)}/delete`, { password: state.studioPassword });
+    toast(`${person.display_name} removed`, "ok");
+    await loadStatus();
+  } catch (err) {
+    toast(err.message, "bad");
+  }
 }
 
 function renderProfile() {
@@ -368,6 +409,7 @@ async function submitStudioPassword(event) {
     state.pendingAction = null;
     if (action === "delete") deleteProfile();
     else if (action === "photo") uploadPhoto();
+    else if (action === "remove-person") removePerson();
     else startEnrollment();
   } catch (err) {
     $("studioPasswordError").textContent = err.message;

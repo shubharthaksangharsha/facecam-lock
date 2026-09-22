@@ -1,0 +1,13 @@
+#!/bin/bash
+# FaceCam Lock PAM wrapper, run by pam_exec from /etc/pam.d/omarchy-lock-fingerprint.
+# Installed to /usr/local/lib/facecam-lock/pam-auth by install.sh, with APP_DIR filled in.
+
+APP_DIR="@APP_DIR@"
+TARGET_USER="${PAM_USER:-$USER}"
+TARGET_HOME=$(getent passwd "$TARGET_USER" | cut -d: -f6)
+
+[[ -n $TARGET_HOME && -f $TARGET_HOME/.config/facecam-lock/profile.json ]] || exit 1
+[[ -f $APP_DIR/pam_helper.py ]] || exit 1
+
+export HOME="$TARGET_HOME" USER="$TARGET_USER"
+exec /usr/bin/python3 -S "$APP_DIR/pam_helper.py"

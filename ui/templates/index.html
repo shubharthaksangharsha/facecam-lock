@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="{{ theme }}"{% if omarchy_vars %} data-omarchy="1"{% endif %}>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FaceCam Lock · Face Studio</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  {% if omarchy_vars %}<style>[data-theme="omarchy"] { {{ omarchy_vars }} }</style>{% endif %}
+</head>
+<body class="flex min-h-screen flex-col items-center p-4 md:p-8">
+
+  <header class="card z-10 mb-6 flex w-full max-w-6xl flex-wrap items-center justify-between gap-4 p-4">
+    <div class="flex items-center gap-3">
+      <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-accent/15 font-mono text-xl text-accent">󰄀</div>
+      <div>
+        <h1 class="text-base font-bold leading-tight">FaceCam Lock</h1>
+        <p class="text-xs text-muted">Face unlock for the Omarchy lock screen</p>
+      </div>
+    </div>
+
+    <nav class="flex items-center gap-1 rounded-xl border border-line/60 bg-bg-deep/40 p-1" role="tablist">
+      <button class="tab" role="tab" data-tab="studio" aria-selected="true">Face Studio</button>
+      <button class="tab" role="tab" data-tab="lock" aria-selected="false">Lock Preview</button>
+      <button class="tab" role="tab" data-tab="settings" aria-selected="false">Settings</button>
+    </nav>
+
+    <div class="flex items-center gap-3">
+      <div class="flex items-center gap-1.5" aria-label="Theme">
+        <button class="swatch" data-theme-pick="omarchy" title="Follow Omarchy theme"
+          style="background: conic-gradient(rgb(var(--accent)), rgb(var(--accent2)), rgb(var(--ok)), rgb(var(--accent)))"></button>
+        <button class="swatch" data-theme-pick="midnight" title="Midnight" style="background:#22d3ee"></button>
+        <button class="swatch" data-theme-pick="matrix" title="Matrix" style="background:#39ff6e"></button>
+        <button class="swatch" data-theme-pick="sunrise" title="Sunrise (light)" style="background:#ea580c"></button>
+      </div>
+      <span id="connectionStatus" class="pill border-line text-muted">
+        <span class="h-1.5 w-1.5 rounded-full bg-muted"></span> Camera off
+      </span>
+    </div>
+  </header>
+
+  <main class="z-10 w-full max-w-6xl">
+
+    <!-- Face Studio -->
+    <section id="tab-studio" class="tab-content grid grid-cols-1 gap-6 lg:grid-cols-12">
+      <div class="card flex flex-col gap-4 p-4 lg:col-span-7">
+        <div class="flex items-center justify-between font-mono text-xs text-muted">
+          <span class="flex items-center gap-2"><span class="h-1.5 w-1.5 animate-pulse rounded-full bg-accent"></span> Live camera</span>
+          <span id="fpsText">– fps</span>
+        </div>
+        <div class="relative aspect-[4/3] w-full overflow-hidden rounded-xl border border-line bg-bg-deep">
+          <canvas id="cameraCanvas" width="480" height="360" class="h-full w-full object-contain"></canvas>
+          <div class="scan-beam"></div>
+          <div id="cameraPaused" class="absolute inset-0 hidden items-center justify-center bg-bg-deep/80 text-sm text-muted">
+            Camera paused while this tab is hidden
+          </div>
+        </div>
+        <div class="rounded-xl border border-line/60 bg-bg-deep/40 p-3.5">
+          <div class="mb-2 flex items-center justify-between text-xs">
+            <span class="text-muted">Match confidence</span>
+            <span id="similarityScoreText" class="font-mono font-semibold text-accent">–</span>
+          </div>
+          <div class="h-2 w-full overflow-hidden rounded-full bg-fg/10">
+            <div id="similarityBar" class="h-full w-0 rounded-full bg-accent transition-[width] duration-150"></div>
+          </div>
+          <p class="mt-2 text-center text-[11px] text-muted">Sit in front of the camera to check how well you're recognised.</p>
+        </div>
+      </div>
+
+      <div class="flex flex-col gap-6 lg:col-span-5">
+        <div id="profileCard" class="card hidden p-5">
+          <div class="flex items-start justify-between gap-3">
+            <div class="flex items-center gap-3">
+              <img id="profileAvatar" src="" alt="" class="h-14 w-14 rounded-xl border-2 border-accent/50 object-cover" />
+              <div>
+                <h3 id="profileUsername" class="text-base font-bold leading-tight"></h3>
+                <span id="profileSampleCount" class="block font-mono text-xs text-accent"></span>
+                <span id="profileDate" class="font-mono text-[11px] text-muted"></span>
+              </div>
+            </div>
+            <span class="pill border-ok/40 bg-ok/10 text-ok">Active</span>
+          </div>
+          <p id="profileRetrainHint" class="mt-3 hidden rounded-lg border border-warn/40 bg-warn/10 p-2.5 text-xs text-warn">
+            This profile has fewer than 5 photos. Retrain for reliable unlocks.
+          </p>
+          <div class="mt-4 flex items-center justify-between border-t border-line/60 pt-4">
+            <button id="reEnrollBtn" class="btn-ghost px-3 py-1.5 text-xs">Retrain face</button>
+            <button id="deleteProfileBtn" class="btn-danger px-3 py-1.5 text-xs">Delete profile</button>
+          </div>
+        </div>
+
+        <div id="emptyProfileCard" class="card flex flex-col items-center gap-3 p-6 text-center">
+          <div class="flex h-12 w-12 items-center justify-center rounded-full bg-accent/10 font-mono text-2xl text-accent">󰄀</div>
+          <div>
+            <h3 class="text-sm font-bold">No face enrolled yet</h3>
+            <p class="mt-1 max-w-xs text-xs text-muted">Capture 5 labeled photos of your face. Training is protected by a password.</p>
+          </div>
+          <button id="startEnrollBtn" class="btn-primary mt-2 w-full">Start face training</button>
+        </div>
+
+        <div id="enrollmentWizard" class="card hidden flex-col gap-4 p-5">
+          <div class="flex items-center justify-between border-b border-line/60 pb-3">
+            <div>
+              <span id="stepCounter" class="block font-mono text-[11px] uppercase tracking-wider text-accent">Photo 1 of 5</span>
+              <h3 id="poseTitle" class="text-sm font-bold">Look straight ahead</h3>
+            </div>
+            <button id="cancelEnrollBtn" class="text-xs text-muted hover:text-fg">Cancel</button>
+          </div>
+
+          <ol id="poseRail" class="grid grid-cols-5 gap-1.5"></ol>
+
+          <p class="rounded-xl border border-accent/30 bg-accent/5 p-3 text-xs text-accent" id="poseHint"></p>
+
+          <label class="flex flex-col gap-1.5">
+            <span class="label">Name on the lock screen</span>
+            <input id="enrollDisplayName" type="text" maxlength="40" class="field" placeholder="Your name" />
+          </label>
+
+          <div id="sampleGallery" class="grid min-h-[76px] grid-cols-5 gap-2 rounded-xl border border-line/60 bg-bg-deep/40 p-2"></div>
+
+          <div class="flex flex-col gap-2">
+            <button id="captureSampleBtn" class="btn-primary w-full">Capture photo <kbd class="rounded bg-on-accent/15 px-1.5 font-mono text-[10px]">Space</kbd></button>
+            <button id="saveEnrollmentBtn" class="btn-ok hidden w-full">Train &amp; save profile</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Lock preview -->
+    <section id="tab-lock" class="tab-content hidden">
+      <div class="card flex flex-col items-center justify-between gap-6 p-6 md:flex-row">
+        <div class="max-w-xl">
+          <h2 class="mb-2 text-xl font-bold">Lock screen</h2>
+          <p class="mb-4 text-sm leading-relaxed text-muted">
+            When you lock or open the lid, the lock screen shows your camera, says
+            <span class="text-fg">"Welcome back"</span> when it recognises you, and falls back to your password if it
+            can't. The <span class="text-fg">Type password</span> button is always there.
+          </p>
+          <div class="flex flex-wrap gap-3">
+            <button id="triggerSystemLockBtn" class="btn-primary">Lock now</button>
+            <button id="testLockScreenBtn" class="btn-ghost">Open browser preview</button>
+          </div>
+        </div>
+        <div class="flex h-44 w-44 flex-col items-center justify-center gap-2 rounded-xl2 border border-line bg-bg-deep/60 text-center">
+          <div class="flex h-16 w-16 items-center justify-center rounded-2xl border-2 border-accent/60 font-mono text-2xl text-accent">󰄀</div>
+          <span class="font-mono text-xs font-bold text-accent">Face + password</span>
+          <span class="text-[11px] text-muted">Omarchy lock plugin</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-settings" class="tab-content hidden grid grid-cols-1 gap-6 md:grid-cols-2">
+      <div class="card flex flex-col gap-4 p-6">
+        <h3 class="text-base font-bold">Recognition</h3>
+        <label class="flex flex-col gap-2">
+          <span class="flex justify-between text-xs"><span class="text-muted">Match threshold</span><span id="thresholdValue" class="font-mono font-bold text-accent">0.38</span></span>
+          <input id="settingThreshold" type="range" min="0.30" max="0.55" step="0.01" value="0.38">
+          <span class="text-[11px] text-muted">0.36–0.40 recommended. Higher is stricter.</span>
+        </label>
+        <label class="flex flex-col gap-1.5"><span class="label">Attempts before password</span>
+          <input id="settingAttempts" type="number" min="1" max="5" value="3" class="field font-mono"></label>
+        <label class="flex flex-col gap-1.5"><span class="label">Seconds per attempt</span>
+          <input id="settingTimeout" type="number" min="1" max="5" step="0.1" value="2.2" class="field font-mono"></label>
+        <label class="flex flex-col gap-1.5"><span class="label">Camera</span>
+          <select id="settingCamera" class="field font-mono">
+            <option value="0">/dev/video0</option>
+            <option value="1">/dev/video1</option>
+            <option value="2">/dev/video2</option>
+          </select></label>
+        <button id="saveSettingsBtn" class="btn-primary mt-2">Save settings</button>
+      </div>
+
+      <div class="card flex flex-col gap-4 p-6">
+        <h3 class="text-base font-bold">Omarchy integration</h3>
+        <ul id="healthList" class="space-y-2 font-mono text-xs"></ul>
+        <p class="rounded-xl border border-accent/30 bg-accent/5 p-3 text-[11px] text-accent">
+          Missing a piece? Run <code class="text-fg">./install.sh</code> from the plugin folder.
+        </p>
+      </div>
+    </section>
+  </main>
+
+  <!-- Training password -->
+  <div id="studioPasswordModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-bg-deep/70 p-4 backdrop-blur-sm">
+    <form id="studioPasswordForm" class="card flex w-full max-w-sm flex-col gap-4 p-6">
+      <div>
+        <h3 id="studioPasswordTitle" class="text-base font-bold">Unlock face training</h3>
+        <p id="studioPasswordHint" class="mt-1 text-xs text-muted">Enter the training password to capture and save face photos.</p>
+      </div>
+      <input id="studioPasswordInput" type="password" autocomplete="current-password" placeholder="Training password" class="field" />
+      <div id="studioPasswordError" class="min-h-[16px] text-xs text-bad"></div>
+      <div class="flex gap-2">
+        <button type="button" id="studioPasswordCancel" class="btn-ghost flex-1">Cancel</button>
+        <button type="submit" class="btn-primary flex-1">Continue</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Confirm -->
+  <div id="confirmModal" class="fixed inset-0 z-50 hidden items-center justify-center bg-bg-deep/70 p-4 backdrop-blur-sm">
+    <div class="card flex w-full max-w-sm flex-col gap-4 p-6">
+      <p id="confirmText" class="text-sm"></p>
+      <div class="flex gap-2">
+        <button id="confirmNo" class="btn-ghost flex-1">Cancel</button>
+        <button id="confirmYes" class="btn-danger flex-1">Delete</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toasts" class="pointer-events-none fixed bottom-4 right-4 z-[60] flex flex-col gap-2"></div>
+
+  <script>window.FACECAM = { hasProfile: {{ 'true' if has_profile else 'false' }} };</script>
+  <script src="/static/js/theme.js"></script>
+  <script src="/static/js/app.js" defer></script>
+</body>
+</html>

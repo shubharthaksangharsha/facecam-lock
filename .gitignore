@@ -1,0 +1,16 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Downloaded by scripts/fetch-models.sh (verified by sha256)
+models/*.onnx
+*.part
+
+# Frontend build tooling (the compiled ui/static/css/app.css is committed)
+node_modules/
+
+# Local state
+*.log
+*.tmp
+.cursor/

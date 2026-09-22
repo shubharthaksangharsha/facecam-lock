@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="{{ theme }}"{% if omarchy_vars %} data-omarchy="1"{% endif %}>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FaceCam Lock · Preview</title>
+  <link rel="stylesheet" href="/static/css/app.css">
+  {% if omarchy_vars %}<style>[data-theme="omarchy"] { {{ omarchy_vars }} }</style>{% endif %}
+</head>
+<body data-display-name="{{ display_name }}" class="flex min-h-screen select-none flex-col items-center justify-between overflow-hidden p-6 md:p-8">
+
+  <div class="mt-4 flex flex-col items-center">
+    <div id="lockTime" class="font-mono text-7xl font-light tracking-tighter md:text-8xl">00:00</div>
+    <div id="lockDate" class="mt-1 font-mono text-sm uppercase tracking-widest text-muted"></div>
+  </div>
+
+  <div class="flex w-full max-w-md flex-col items-center gap-5">
+    <div id="scannerAperture" class="relative h-64 w-64 overflow-hidden rounded-[2rem] border-[3px] border-accent bg-bg-deep shadow-2xl transition-colors md:h-72 md:w-72">
+      <img id="lockCameraPreview" alt="" class="h-full w-full object-cover [transform:scaleX(-1)]" />
+      <div class="scan-beam" id="scanBeam"></div>
+      <div id="unlockCheckmark" class="absolute inset-0 hidden items-center justify-center bg-ok/20 text-6xl text-ok">✓</div>
+    </div>
+
+    <div class="flex items-center gap-2" id="attemptDots"></div>
+    <div id="biometricStatusText" class="min-h-[24px] text-center text-sm font-medium">Looking for your face…</div>
+
+    <form id="passwordFallbackContainer" class="card hidden w-full flex-col gap-3 p-5">
+      <p id="passwordHint" class="text-center text-xs text-muted">Type your session password</p>
+      <input id="passwordInput" type="password" autocomplete="current-password" placeholder="Password"
+        class="field text-center tracking-widest" />
+      <div id="passwordError" class="min-h-[16px] text-center text-xs text-bad"></div>
+      <button id="passwordSubmitBtn" type="submit" class="btn-primary">Unlock</button>
+    </form>
+  </div>
+
+  <div class="mb-2 flex w-full max-w-md flex-col items-center gap-3">
+    <button id="openPasswordBtn" type="button" class="btn-ghost w-full">Type password</button>
+    <div class="flex w-full items-center justify-between font-mono text-xs text-muted">
+      <span>{{ display_name }}</span>
+      <span>FaceCam Lock · preview</span>
+    </div>
+  </div>
+
+  <script src="/static/js/theme.js"></script>
+  <script src="/static/js/lock.js" defer></script>
+</body>
+</html>

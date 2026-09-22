@@ -1,0 +1,165 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Theme tokens: space-separated RGB so Tailwind's /alpha modifiers work. */
+:root,
+[data-theme="midnight"] {
+  --bg: 9 11 16;
+  --bg-deep: 4 6 10;
+  --surface: 20 25 37;
+  --line: 44 52 70;
+  --fg: 241 245 249;
+  --muted: 140 152 172;
+  --accent: 34 211 238;
+  --accent2: 99 102 241;
+  --ok: 52 211 153;
+  --warn: 251 191 36;
+  --bad: 251 113 133;
+  --on-accent: 4 6 10;
+  color-scheme: dark;
+}
+
+[data-theme="matrix"] {
+  --bg: 3 10 5;
+  --bg-deep: 0 4 1;
+  --surface: 8 24 12;
+  --line: 22 64 32;
+  --fg: 200 255 210;
+  --muted: 92 160 108;
+  --accent: 57 255 110;
+  --accent2: 0 180 90;
+  --ok: 57 255 110;
+  --warn: 220 255 90;
+  --bad: 255 90 90;
+  --on-accent: 0 12 4;
+  color-scheme: dark;
+}
+
+[data-theme="sunrise"] {
+  --bg: 250 247 242;
+  --bg-deep: 238 232 222;
+  --surface: 255 255 255;
+  --line: 222 214 200;
+  --fg: 34 30 26;
+  --muted: 118 108 96;
+  --accent: 234 88 12;
+  --accent2: 190 24 93;
+  --ok: 22 163 74;
+  --warn: 202 138 4;
+  --bad: 220 38 38;
+  --on-accent: 255 255 255;
+  color-scheme: light;
+}
+
+/* data-theme="omarchy" gets its variables inline from the server (current desktop theme). */
+
+@layer base {
+  html,
+  body {
+    @apply bg-bg text-fg font-sans antialiased;
+    min-height: 100vh;
+  }
+
+  body {
+    background-image:
+      radial-gradient(60vw 60vw at -10% -20%, rgb(var(--accent2) / 0.10), transparent 70%),
+      radial-gradient(60vw 60vw at 110% 120%, rgb(var(--accent) / 0.08), transparent 70%);
+    background-attachment: fixed;
+  }
+
+  ::selection {
+    background: rgb(var(--accent) / 0.35);
+  }
+
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: rgb(var(--fg) / 0.15); border-radius: 3px; }
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl2 border border-line/70 bg-surface/80 shadow-xl shadow-bg-deep/40;
+    backdrop-filter: blur(14px);
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold
+      transition-colors duration-150 disabled:cursor-not-allowed disabled:opacity-50
+      focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60;
+  }
+  .btn-primary { @apply btn bg-accent text-on-accent hover:bg-accent/85; }
+  .btn-ghost { @apply btn border border-line bg-fg/5 text-fg hover:bg-fg/10; }
+  .btn-danger { @apply btn border border-bad/40 bg-bad/10 text-bad hover:bg-bad/20; }
+  .btn-ok { @apply btn bg-ok text-on-accent hover:bg-ok/85; }
+
+  .field {
+    @apply w-full rounded-xl border border-line bg-bg-deep/60 px-3 py-2.5 text-sm text-fg outline-none
+      placeholder:text-muted/70 transition-colors focus:border-accent;
+  }
+
+  .label { @apply text-xs font-medium text-muted; }
+
+  .pill { @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono text-[11px]; }
+
+  .tab {
+    @apply rounded-lg px-3.5 py-2 text-sm font-medium text-muted transition-colors hover:text-fg;
+  }
+  .tab[aria-selected="true"] { @apply bg-fg/10 text-fg; }
+
+  .swatch {
+    @apply h-6 w-6 rounded-full border-2 border-transparent transition-transform hover:scale-110;
+  }
+  .swatch[aria-pressed="true"] { @apply border-fg; }
+}
+
+/* Scan beam over live video */
+.scan-beam {
+  position: absolute;
+  inset-inline: 8%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgb(var(--accent)), transparent);
+  box-shadow: 0 0 14px rgb(var(--accent));
+  animation: scan 2.2s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+@keyframes scan {
+  from { top: 6%; opacity: 0.25; }
+  20%, 80% { opacity: 0.9; }
+  to { top: 94%; opacity: 0.25; }
+}
+
+@keyframes toast-in {
+  from { transform: translateY(8px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+.toast { animation: toast-in 0.18s ease-out; }
+
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  25%, 75% { transform: translateX(-6px); }
+  50% { transform: translateX(6px); }
+}
+.animate-shake { animation: shake 0.35s ease-in-out; }
+
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 3px;
+  background: rgb(var(--fg) / 0.12);
+  outline: none;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: rgb(var(--accent));
+  box-shadow: 0 0 10px rgb(var(--accent) / 0.6);
+  cursor: pointer;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .scan-beam, .toast, .animate-shake { animation: none; }
+}

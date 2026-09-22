@@ -1,0 +1,12 @@
+{
+  "name": "facecam-lock-ui",
+  "private": true,
+  "description": "Builds the static stylesheet for the FaceCam Lock Face Studio",
+  "scripts": {
+    "build:css": "tailwindcss -c ui/tailwind.config.js -i ui/src/app.css -o ui/static/css/app.css --minify",
+    "watch:css": "tailwindcss -c ui/tailwind.config.js -i ui/src/app.css -o ui/static/css/app.css --watch"
+  },
+  "devDependencies": {
+    "tailwindcss": "^3.4.17"
+  }
+}

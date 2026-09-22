@@ -8,6 +8,8 @@ JSON header, then raw JPEG bytes.
 """
 
 import asyncio
+import base64
+import binascii
 import json
 import os
 import re
@@ -21,7 +23,7 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 import cv2
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -35,6 +37,7 @@ from core import (
     verify_user_password,
     get_current_username,
 )
+from core.avatar import make_avatar
 from core.camera import scale_to_width
 from core.detector import scale_raw_face
 from core.storage import MIN_ENROLL_SAMPLES
@@ -85,6 +88,11 @@ class EnrollSaveRequest(BaseModel):
 
 class StudioPasswordRequest(BaseModel):
     password: str
+
+
+class AvatarRequest(BaseModel):
+    password: str
+    image: str  # data URL or bare base64
 
 
 def _public_settings() -> Dict[str, Any]:
@@ -177,6 +185,7 @@ def get_status():
             "sample_count": len(profile.get("exemplars", [])),
             "avatar_base64": profile.get("avatar_base64"),
             "min_samples": MIN_ENROLL_SAMPLES,
+            "photo_version": int(storage.avatar_path.stat().st_mtime) if storage.has_avatar() else None,
         }
     return {
         "has_profile": profile is not None,
@@ -302,6 +311,39 @@ def save_enrollment(payload: EnrollSaveRequest):
     if not storage.save_profile(profile_data):
         raise HTTPException(status_code=500, detail="Failed to save face profile")
     return {"status": "ok", "display_name": display_name, "sample_count": len(payload.samples)}
+
+
+@app.get("/api/profile/photo")
+def get_profile_photo():
+    if not storage.has_avatar():
+        raise HTTPException(status_code=404, detail="No profile photo")
+    return FileResponse(storage.avatar_path, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+
+@app.post("/api/profile/photo")
+def set_profile_photo(payload: AvatarRequest):
+    """Crop the uploaded photo around the face and keep it for the lock screen's welcome state."""
+    _require_studio_password(payload.password)
+    profile = storage.get_profile()
+    if not profile:
+        raise HTTPException(status_code=400, detail="Enroll your face before adding a photo")
+    raw = payload.image.split(",", 1)[-1]
+    try:
+        data = base64.b64decode(raw, validate=True)
+        if len(data) > 15 * 1024 * 1024:
+            raise ValueError("Photo is larger than 15 MB")
+        jpeg, score, face_found = make_avatar(data, detector, recognizer, profile)
+    except (ValueError, binascii.Error) as e:
+        raise HTTPException(status_code=400, detail=str(e) or "Not a readable image")
+    storage.save_avatar(jpeg)
+    return {"status": "ok", "face_found": face_found, "similarity": None if score is None else round(score, 3)}
+
+
+@app.delete("/api/profile/photo")
+def delete_profile_photo(payload: StudioPasswordRequest):
+    _require_studio_password(payload.password)
+    storage.avatar_path.unlink(missing_ok=True)
+    return {"status": "ok"}
 
 
 @app.post("/api/enroll/delete")

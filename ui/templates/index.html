@@ -49,9 +49,17 @@
         </div>
         <div class="relative aspect-[4/3] w-full overflow-hidden rounded-xl border border-line bg-bg-deep">
           <canvas id="cameraCanvas" width="480" height="360" class="h-full w-full object-contain"></canvas>
-          <div class="scan-beam"></div>
-          <div id="cameraPaused" class="absolute inset-0 hidden items-center justify-center bg-bg-deep/80 text-sm text-muted">
-            Camera paused while this tab is hidden
+          <div class="scan-beam" id="scanBeam"></div>
+          <div class="viewfinder" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+
+          <div id="noFaceChip" class="chip pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 opacity-0">
+            <span class="h-1.5 w-1.5 rounded-full bg-warn"></span> No face in view — move into the frame
+          </div>
+
+          <div id="cameraPaused" class="resting absolute inset-0 hidden flex-col items-center justify-center gap-3 text-center">
+            <div class="resting-icon"><span></span></div>
+            <p class="text-sm font-semibold">Camera is resting</p>
+            <p class="max-w-[16rem] text-xs text-muted">It turns back on the moment you come back to Face Studio.</p>
           </div>
         </div>
         <div class="rounded-xl border border-line/60 bg-bg-deep/40 p-3.5">
@@ -82,6 +90,18 @@
           <p id="profileRetrainHint" class="mt-3 hidden rounded-lg border border-warn/40 bg-warn/10 p-2.5 text-xs text-warn">
             This profile has fewer than 5 photos. Retrain for reliable unlocks.
           </p>
+          <div class="mt-4 flex items-center gap-4 rounded-xl border border-line/60 bg-bg-deep/40 p-3">
+            <div class="relative h-16 w-16 shrink-0 overflow-hidden rounded-2xl border-2 border-accent/60 bg-bg-deep">
+              <img id="profilePhoto" alt="" class="hidden h-full w-full object-cover" />
+              <span id="profilePhotoEmpty" class="absolute inset-0 flex items-center justify-center font-mono text-xl text-muted">󰀄</span>
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="text-sm font-semibold">Welcome photo</p>
+              <p class="text-[11px] text-muted">Shown on the lock screen only after your face is recognised.</p>
+            </div>
+            <button id="changePhotoBtn" class="btn-ghost shrink-0 px-3 py-1.5 text-xs">Change</button>
+            <input id="photoInput" type="file" accept="image/*" class="hidden" />
+          </div>
           <div class="mt-4 flex items-center justify-between border-t border-line/60 pt-4">
             <button id="reEnrollBtn" class="btn-ghost px-3 py-1.5 text-xs">Retrain face</button>
             <button id="deleteProfileBtn" class="btn-danger px-3 py-1.5 text-xs">Delete profile</button>

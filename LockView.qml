@@ -18,9 +18,12 @@ Item {
   property bool syncingPasswordText: false
   property string faceState: "idle"
   property string faceMessage: ""
-  property string displayName: "Shubharthak"
+  property string displayName: ""
   property string previewPath: ""
   property int previewTick: 0
+  property string avatarPath: ""
+  property int faceAttempt: 1
+  property int faceMaxAttempts: 3
   property bool passwordPanelOpen: false
 
   readonly property string placeholderText: "Enter Password"
@@ -30,7 +33,6 @@ Item {
   readonly property int fieldFontSize: Math.round(Style.font.heading * 1.125)
   readonly property int passwordDotFontSize: Math.round(Style.font.heading * 1.33)
   readonly property int passwordDotLetterSpacing: Math.round(Style.font.heading * 0.19)
-  readonly property real fingerprintReserve: 0
   readonly property real passwordDotScale: dotMetrics.advanceWidth > 0
     ? Math.min(1, (passwordInput.width - 4) / dotMetrics.advanceWidth)
     : 1
@@ -39,14 +41,30 @@ Item {
   readonly property bool faceFailed: faceState === "failed" || faceState === "camera_error" || faceState === "no_profile"
   readonly property bool showPasswordField: passwordPanelOpen || faceFailed || authenticatingPassword || failureMessage.length > 0
   readonly property bool matched: faceState === "matched"
+  readonly property bool scanning: faceState === "scanning" || faceState === "waiting"
+  readonly property bool animate: loadBackground
+  readonly property bool hasAvatar: avatarImage.status === Image.Ready
+  readonly property color accentColor: Color.lock.borderActive
+  readonly property color softError: Util.alpha(Color.lock.borderError, 0.8)
   readonly property var inputBorderSpec: errorState
     ? Border.surfaceSpec("lock", "border-error", Color.lock.borderError, root.outlineThickness, "border-alpha")
     : Border.surfaceSpec("lock", "border-active", Color.lock.borderActive, root.outlineThickness, "border-alpha")
+
   readonly property string statusLine: {
     if (matched) return displayName ? "Welcome back " + displayName : "Welcome back"
-    if (faceFailed) return faceMessage || "Can't detect face"
-    if (faceMessage.length > 0) return faceMessage
-    return "Looking for your face…"
+    if (faceState === "no_profile") return "Face unlock isn't set up"
+    if (faceState === "camera_error") return "Camera unavailable"
+    if (faceFailed) return "Face not recognised"
+    if (faceState === "waiting") return "Open the lid to scan"
+    return "Looking for your face"
+  }
+  readonly property string statusDetail: {
+    if (matched) return "Unlocking…"
+    if (faceState === "no_profile") return "Open FaceCam Lock to enroll, or type your password"
+    if (faceFailed) return "Tap the camera to try again, or type your password"
+    if (scanning && !frameReady) return "Starting camera…"
+    if (scanning && faceAttempt > 1) return "Attempt " + faceAttempt + " of " + faceMaxAttempts
+    return "Hold still and look at the screen"
   }
 
   signal submitPassword(string password)
@@ -54,6 +72,36 @@ Item {
   signal clearFailureRequested()
   signal wakeRequested()
   signal passwordPanelRequested()
+  signal retryRequested()
+
+  // Four rounded L-shaped corners: the viewfinder and the small "no face" icon.
+  component Corners: Item {
+    id: corners
+    property real length: 18
+    property real thickness: 3
+    property color color: "white"
+    Repeater {
+      model: 4
+      Item {
+        readonly property bool isRight: index % 2 === 1
+        readonly property bool isBottom: index >= 2
+        x: isRight ? corners.width - width : 0
+        y: isBottom ? corners.height - height : 0
+        width: corners.length
+        height: corners.length
+        Rectangle {
+          width: parent.width; height: corners.thickness; radius: height / 2
+          y: parent.isBottom ? parent.height - height : 0
+          color: corners.color
+        }
+        Rectangle {
+          width: corners.thickness; height: parent.height; radius: width / 2
+          x: parent.isRight ? parent.width - width : 0
+          color: corners.color
+        }
+      }
+    }
+  }
 
   function fileUrl(path) {
     if (!path) return ""
@@ -123,12 +171,14 @@ Item {
     if (showPasswordField && inputEnabled) Qt.callLater(forcePasswordFocus)
   }
   onFaceFailedChanged: {
-    if (faceFailed) passwordPanelRequested()
+    if (!faceFailed) return
+    passwordPanelRequested()
+    if (animate) shakeAnim.restart()
   }
-  Component.onCompleted: {
-    syncPasswordText()
-    clockTimer.restart()
+  onMatchedChanged: {
+    if (matched && animate) pulseAnim.restart()
   }
+  Component.onCompleted: syncPasswordText()
 
   TextMetrics {
     id: dotMetrics
@@ -176,7 +226,6 @@ Item {
       anchors.topMargin: Math.round(parent.height * 0.07)
       anchors.bottomMargin: Math.round(Style.space(72))
       spacing: Style.space(14)
-      clip: true
 
       Column {
         anchors.horizontalCenter: parent.horizontalCenter
@@ -193,6 +242,7 @@ Item {
         }
 
         Text {
+          id: dateLabel
           anchors.horizontalCenter: parent.horizontalCenter
           text: Qt.formatDate(new Date(), "dddd, MMMM d")
           color: Color.lock.placeholder
@@ -201,6 +251,9 @@ Item {
         }
       }
 
+      Item { width: 1; height: Style.space(6) }
+
+      // ---------------------------------------------------------------- camera stage
       Item {
         id: cameraFrame
         anchors.horizontalCenter: parent.horizontalCenter
@@ -210,18 +263,57 @@ Item {
           var preferred = Style.space(220)
           return Math.max(Style.space(156), Math.min(preferred, maxByHeight, maxByWidth))
         }
-        readonly property int boxRadius: Math.round(boxSize * 0.18)
+        readonly property int boxRadius: Math.round(boxSize * 0.2)
         readonly property int innerPad: 3
         readonly property int innerSize: Math.max(1, boxSize - innerPad * 2)
         readonly property int innerRadius: Math.max(1, boxRadius - innerPad)
         width: boxSize
         height: boxSize
-        clip: true
+        transform: Translate { id: shake }
+
+        SequentialAnimation {
+          id: shakeAnim
+          NumberAnimation { target: shake; property: "x"; to: -9; duration: 55; easing.type: Easing.OutQuad }
+          NumberAnimation { target: shake; property: "x"; to: 8; duration: 90; easing.type: Easing.InOutQuad }
+          NumberAnimation { target: shake; property: "x"; to: -5; duration: 80; easing.type: Easing.InOutQuad }
+          NumberAnimation { target: shake; property: "x"; to: 0; duration: 70; easing.type: Easing.OutQuad }
+        }
+
+        // Soft halo: always faintly present, blooms on a match.
+        Rectangle {
+          id: halo
+          anchors.centerIn: parent
+          width: parent.width + 18
+          height: parent.height + 18
+          radius: cameraFrame.boxRadius + 9
+          color: "transparent"
+          border.width: 5
+          border.color: root.matched ? root.accentColor : (root.faceFailed ? root.softError : root.accentColor)
+          opacity: root.matched ? 0.45 : (root.faceFailed ? 0.18 : 0.12)
+          Behavior on opacity { NumberAnimation { duration: 260 } }
+        }
+
+        Rectangle {
+          id: pulseRing
+          anchors.centerIn: parent
+          width: parent.width
+          height: parent.height
+          radius: cameraFrame.boxRadius
+          color: "transparent"
+          border.width: 3
+          border.color: root.accentColor
+          opacity: 0
+          ParallelAnimation {
+            id: pulseAnim
+            NumberAnimation { target: pulseRing; property: "scale"; from: 1.0; to: 1.22; duration: 650; easing.type: Easing.OutCubic }
+            NumberAnimation { target: pulseRing; property: "opacity"; from: 0.7; to: 0; duration: 650; easing.type: Easing.OutCubic }
+          }
+        }
 
         Rectangle {
           anchors.fill: parent
           radius: cameraFrame.boxRadius
-          color: "#05070c"
+          color: Util.alpha(Color.background, 0.92)
         }
 
         Rectangle {
@@ -273,78 +365,260 @@ Item {
             onStatusChanged: if (status === Image.Ready) root.onBufferReady(1)
           }
 
-          Rectangle {
-            id: scanLine
-            x: cameraFrame.innerRadius
-            width: Math.max(1, cameraFrame.innerSize - cameraFrame.innerRadius * 2)
-            height: 2
-            y: cameraFrame.innerRadius
-            visible: !root.matched && !root.faceFailed
-            color: Color.lock.borderActive
-            opacity: 0.8
+          // Not recognised: the last frame, frozen, blurred and dimmed. It is a
+          // static image, so the blur is rendered once, not per frame.
+          MultiEffect {
+            anchors.fill: parent
+            visible: root.faceFailed && root.frameReady
+            source: root.shownBuffer === 0 ? previewA : previewB
+            autoPaddingEnabled: false
+            blurEnabled: true
+            blur: 1.0
+            blurMax: 48
+            saturation: -0.7
+            brightness: -0.35
+          }
 
-            SequentialAnimation on y {
-              running: root.loadBackground && !root.matched && !root.faceFailed
+          Rectangle {
+            anchors.fill: parent
+            color: Color.background
+            opacity: root.faceFailed ? (root.frameReady ? 0.25 : 0.6) : 0
+            Behavior on opacity { NumberAnimation { duration: 220 } }
+          }
+
+          // Light sweep while scanning: a soft band instead of a hard line.
+          Rectangle {
+            id: sweep
+            width: parent.width
+            height: Math.round(parent.height * 0.28)
+            visible: root.scanning && root.frameReady
+            gradient: Gradient {
+              GradientStop { position: 0.0; color: "transparent" }
+              GradientStop { position: 0.5; color: Util.alpha(root.accentColor, 0.2) }
+              GradientStop { position: 1.0; color: "transparent" }
+            }
+            NumberAnimation on y {
+              running: sweep.visible && root.animate
               loops: Animation.Infinite
-              NumberAnimation {
-                to: Math.max(cameraFrame.innerRadius, cameraFrame.innerSize - cameraFrame.innerRadius)
-                duration: 1600
-                easing.type: Easing.InOutSine
+              from: -sweep.height
+              to: cameraContent.height
+              duration: 2200
+              easing.type: Easing.InOutSine
+            }
+          }
+
+          // Welcome: the owner's photo fades in over the camera.
+          Image {
+            id: avatarImage
+            anchors.fill: parent
+            source: root.avatarPath ? "file://" + root.avatarPath : ""
+            fillMode: Image.PreserveAspectCrop
+            asynchronous: true
+            cache: false
+            sourceSize.width: cameraFrame.innerSize * 2
+            sourceSize.height: cameraFrame.innerSize * 2
+            opacity: root.matched && root.hasAvatar ? 1 : 0
+            scale: root.matched ? 1.0 : 1.08
+            visible: opacity > 0
+            Behavior on opacity { NumberAnimation { duration: 280; easing.type: Easing.OutCubic } }
+            Behavior on scale { NumberAnimation { duration: 420; easing.type: Easing.OutCubic } }
+          }
+        }
+
+        // Viewfinder corners, breathing while scanning.
+        Corners {
+          anchors.fill: parent
+          anchors.margins: Math.round(cameraFrame.boxSize * 0.09)
+          length: Math.round(cameraFrame.boxSize * 0.13)
+          thickness: 3
+          color: root.accentColor
+          visible: root.scanning
+          SequentialAnimation on opacity {
+            running: root.scanning && root.animate
+            loops: Animation.Infinite
+            NumberAnimation { from: 0.95; to: 0.4; duration: 1100; easing.type: Easing.InOutSine }
+            NumberAnimation { from: 0.4; to: 0.95; duration: 1100; easing.type: Easing.InOutSine }
+          }
+        }
+
+        // Starting camera: gently pulsing camera glyph.
+        Text {
+          anchors.centerIn: parent
+          visible: root.scanning && !root.frameReady
+          text: "󰄀"
+          color: root.accentColor
+          font.family: Style.font.family
+          font.pixelSize: Math.round(cameraFrame.boxSize * 0.18)
+          SequentialAnimation on opacity {
+            running: parent.visible && root.animate
+            loops: Animation.Infinite
+            NumberAnimation { from: 0.9; to: 0.35; duration: 900; easing.type: Easing.InOutSine }
+            NumberAnimation { from: 0.35; to: 0.9; duration: 900; easing.type: Easing.InOutSine }
+          }
+        }
+
+        // Not recognised: a small neutral face in a viewfinder, and a retry hint.
+        Column {
+          anchors.centerIn: parent
+          spacing: Style.space(12)
+          visible: root.faceFailed
+          opacity: visible ? 1 : 0
+          Behavior on opacity { NumberAnimation { duration: 220 } }
+
+          Item {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: Math.round(cameraFrame.boxSize * 0.3)
+            height: width
+
+            Corners {
+              anchors.fill: parent
+              length: Math.round(parent.width * 0.3)
+              thickness: 3
+              color: Color.lock.text
+              opacity: 0.85
+            }
+            Row {
+              anchors.horizontalCenter: parent.horizontalCenter
+              y: Math.round(parent.height * 0.36)
+              spacing: Math.round(parent.width * 0.22)
+              Repeater {
+                model: 2
+                Rectangle { width: 5; height: 5; radius: 2.5; color: Color.lock.text; opacity: 0.85 }
               }
-              NumberAnimation {
-                to: cameraFrame.innerRadius
-                duration: 1600
-                easing.type: Easing.InOutSine
-              }
+            }
+            Rectangle {
+              anchors.horizontalCenter: parent.horizontalCenter
+              y: Math.round(parent.height * 0.64)
+              width: Math.round(parent.width * 0.32)
+              height: 3
+              radius: 1.5
+              color: Color.lock.text
+              opacity: 0.85
+            }
+          }
+
+          Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: root.faceState === "failed"
+            width: retryLabel.implicitWidth + Style.space(20)
+            height: retryLabel.implicitHeight + Style.space(10)
+            radius: height / 2
+            color: Util.alpha(Color.background, 0.55)
+            border.width: 1
+            border.color: Util.alpha(Color.lock.text, 0.18)
+            Text {
+              id: retryLabel
+              anchors.centerIn: parent
+              text: "Tap to try again"
+              color: Color.lock.text
+              font.family: Style.font.family
+              font.pixelSize: Math.round(Style.font.body * 0.85)
             }
           }
         }
 
+        // Frame outline.
         Rectangle {
           anchors.fill: parent
           radius: cameraFrame.boxRadius
           color: "transparent"
+          border.width: root.matched ? 3 : 2
+          border.color: root.matched ? root.accentColor : (root.faceFailed ? root.softError : Util.alpha(root.accentColor, 0.7))
+          Behavior on border.color { ColorAnimation { duration: 220 } }
+        }
+
+        // Check badge on a match.
+        Rectangle {
+          width: Math.round(cameraFrame.boxSize * 0.17)
+          height: width
+          radius: width / 2
+          x: cameraFrame.boxSize - width * 0.8
+          y: cameraFrame.boxSize - width * 0.8
+          color: root.accentColor
           border.width: 3
-          border.color: root.matched ? "#10b981" : (root.faceFailed ? Color.lock.borderError : Color.lock.borderActive)
+          border.color: Color.background
+          scale: root.matched ? 1 : 0
+          visible: scale > 0
+          Behavior on scale { NumberAnimation { duration: 320; easing.type: Easing.OutBack } }
+          Text {
+            anchors.centerIn: parent
+            text: "✓"
+            color: Color.background
+            font.pixelSize: Math.round(parent.width * 0.55)
+            font.bold: true
+          }
         }
 
-        Text {
-          anchors.centerIn: parent
-          visible: !root.frameReady
-          text: "󰄀"
-          color: Color.lock.placeholder
-          font.family: Style.font.family
-          font.pixelSize: Math.round(Style.font.heading * 2)
-        }
-
-        Text {
-          anchors.centerIn: parent
-          visible: root.matched
-          text: "✓"
-          color: "#10b981"
-          font.pixelSize: Math.round(Style.font.heading * 2.6)
+        MouseArea {
+          anchors.fill: parent
+          enabled: root.faceState === "failed" && root.inputEnabled
+          cursorShape: enabled ? Qt.PointingHandCursor : Qt.ArrowCursor
+          onClicked: root.retryRequested()
         }
       }
 
-      Text {
+      Item { width: 1; height: Style.space(4) }
+
+      // ---------------------------------------------------------------- status
+      Column {
         anchors.horizontalCenter: parent.horizontalCenter
         width: parent.width - Style.space(40)
-        horizontalAlignment: Text.AlignHCenter
-        wrapMode: Text.WordWrap
-        text: root.statusLine
-        color: root.matched ? "#34d399" : (root.faceFailed ? Color.lock.textError : Color.lock.text)
-        font.family: Style.font.family
-        font.pixelSize: root.matched ? Math.round(Style.font.heading * 1.15) : Style.font.body
-        font.weight: root.matched ? Font.DemiBold : Font.Normal
+        spacing: Style.space(4)
+        // Keeps text legible over bright wallpapers; re-rendered only when text changes.
+        layer.enabled: root.animate
+        layer.effect: MultiEffect {
+          shadowEnabled: true
+          shadowColor: Color.background
+          shadowOpacity: 0.95
+          shadowBlur: 0.7
+          shadowVerticalOffset: 1
+          shadowHorizontalOffset: 0
+        }
+
+        Text {
+          id: titleLabel
+          width: parent.width
+          horizontalAlignment: Text.AlignHCenter
+          wrapMode: Text.WordWrap
+          text: root.statusLine + (root.scanning && root.frameReady ? dots.text : "")
+          color: root.matched ? root.accentColor : Color.lock.text
+          font.family: Style.font.family
+          font.pixelSize: root.matched ? Math.round(Style.font.heading * 1.35) : Math.round(Style.font.heading * 1.05)
+          font.weight: root.matched ? Font.DemiBold : Font.Medium
+          Behavior on font.pixelSize { NumberAnimation { duration: 200 } }
+        }
+
+        Text {
+          width: parent.width
+          horizontalAlignment: Text.AlignHCenter
+          wrapMode: Text.WordWrap
+          text: root.statusDetail
+          color: Util.alpha(Color.lock.text, 0.82)
+          font.family: Style.font.family
+          font.pixelSize: Style.font.body
+        }
+
+        QtObject {
+          id: dots
+          property int count: 0
+          readonly property string text: count === 0 ? "" : " " + "·".repeat(count)
+        }
+        Timer {
+          interval: 420
+          repeat: true
+          running: root.scanning && root.frameReady && root.animate
+          onTriggered: dots.count = (dots.count + 1) % 4
+        }
       }
 
       Item {
         width: parent.width
-        height: root.showPasswordField ? inputField.height : 0
+        height: root.showPasswordField ? inputField.height + Style.space(6) : 0
         visible: root.showPasswordField
 
         BorderSurface {
           id: inputField
+          y: Style.space(6)
           width: root.fieldWidth
           height: root.fieldHeight
           anchors.horizontalCenter: parent.horizontalCenter
@@ -418,8 +692,6 @@ Item {
           }
         }
       }
-
-      Item { width: 1; height: Style.space(8) }
     }
 
     Button {
@@ -427,9 +699,11 @@ Item {
       anchors.horizontalCenter: parent.horizontalCenter
       anchors.bottom: parent.bottom
       anchors.bottomMargin: Math.round(Style.space(28))
-      text: root.showPasswordField ? "Password field ready" : "Type password"
+      text: "Type password"
+      iconText: "󰌾"
       bordered: true
       enabled: root.inputEnabled
+      visible: !root.matched
       onClicked: {
         root.wakeRequested()
         root.openPassword()
@@ -438,12 +712,13 @@ Item {
   }
 
   Timer {
-    id: clockTimer
     interval: 1000
     repeat: true
-    running: true
+    running: root.loadBackground
     onTriggered: {
-      clockLabel.text = Qt.formatTime(new Date(), "hh:mm")
+      var now = new Date()
+      clockLabel.text = Qt.formatTime(now, "hh:mm")
+      dateLabel.text = Qt.formatDate(now, "dddd, MMMM d")
     }
   }
 }

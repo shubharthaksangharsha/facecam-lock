@@ -129,6 +129,76 @@
   to { top: 94%; opacity: 0.25; }
 }
 
+/* Viewfinder corners over the live feed */
+.viewfinder {
+  position: absolute;
+  inset: 10%;
+  pointer-events: none;
+  animation: breathe 2.2s ease-in-out infinite;
+}
+.viewfinder i {
+  position: absolute;
+  width: 13%;
+  aspect-ratio: 1;
+  border: 0 solid rgb(var(--accent) / 0.9);
+  border-radius: 6px;
+}
+.viewfinder i:nth-child(1) { top: 0; left: 0; border-top-width: 3px; border-left-width: 3px; }
+.viewfinder i:nth-child(2) { top: 0; right: 0; border-top-width: 3px; border-right-width: 3px; }
+.viewfinder i:nth-child(3) { bottom: 0; left: 0; border-bottom-width: 3px; border-left-width: 3px; }
+.viewfinder i:nth-child(4) { bottom: 0; right: 0; border-bottom-width: 3px; border-right-width: 3px; }
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.95; }
+  50% { opacity: 0.4; }
+}
+
+/* Floating hint over the video */
+.chip {
+  @apply flex items-center gap-2 whitespace-nowrap rounded-full border border-line/70 bg-bg-deep/75 px-3.5 py-1.5 text-xs text-fg shadow-lg;
+  backdrop-filter: blur(10px);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+.chip.show { opacity: 1; }
+
+/* Camera resting (tab hidden / studio not visible) */
+.resting {
+  background:
+    radial-gradient(60% 60% at 50% 45%, rgb(var(--accent) / 0.10), transparent 70%),
+    rgb(var(--bg-deep) / 0.96);
+  backdrop-filter: blur(12px);
+}
+.resting-icon {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 20px;
+  border: 2px solid rgb(var(--accent) / 0.55);
+  display: grid;
+  place-items: center;
+  animation: breathe 3s ease-in-out infinite;
+}
+.resting-icon::before {
+  content: "";
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid rgb(var(--accent) / 0.8);
+}
+.resting-icon span {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgb(var(--muted));
+}
+
+/* Nothing animates in the video area while the camera is resting */
+.is-resting .scan-beam,
+.is-resting .viewfinder { display: none; }
+
 @keyframes toast-in {
   from { transform: translateY(8px); opacity: 0; }
   to { transform: none; opacity: 1; }
@@ -161,5 +231,5 @@ input[type="range"]::-webkit-slider-thumb {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .scan-beam, .toast, .animate-shake { animation: none; }
+  .scan-beam, .toast, .animate-shake, .viewfinder, .resting-icon { animation: none; }
 }

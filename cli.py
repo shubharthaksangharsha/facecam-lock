@@ -8,6 +8,7 @@ facecam-lock command line.
   facecam-lock status       print profile, settings and integration status
   facecam-lock server       run the Face Studio server in the foreground
   facecam-lock lock         lock the session (Omarchy)
+  facecam-lock photo FILE   set the photo shown with "Welcome back" after a match
 """
 
 import argparse
@@ -98,7 +99,8 @@ def print_status() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(prog="facecam-lock", description="Face unlock for the Omarchy lock screen")
     parser.add_argument("command", nargs="?", default="studio",
-                        choices=["studio", "daemon", "scan", "stop", "status", "server", "lock", "preview"])
+                        choices=["studio", "daemon", "scan", "stop", "status", "server", "lock", "preview", "photo"])
+    parser.add_argument("path", nargs="?", help="image file for `photo`")
     # Flags kept for older desktop entries and scripts.
     parser.add_argument("--lock", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--status", action="store_true", help=argparse.SUPPRESS)
@@ -125,6 +127,30 @@ def main() -> None:
                                   "--host", "127.0.0.1", "--port", str(SERVER_PORT)])
     elif command == "lock":
         subprocess.run(["omarchy-system-lock"])
+    elif command == "photo":
+        set_photo(args.path)
+
+
+def set_photo(path) -> None:
+    """Set the photo shown with "Welcome back" once your face is matched."""
+    if not path:
+        sys.exit("usage: facecam-lock photo <image>")
+    from core.avatar import make_avatar
+    from core.detector import FaceDetector
+    from core.recognizer import FaceRecognizer
+    from core.storage import StorageManager
+    storage = StorageManager()
+    profile = storage.get_profile()
+    if not profile:
+        sys.exit("Enroll your face first (run `facecam-lock`).")
+    jpeg, score, face_found = make_avatar(Path(path).expanduser().read_bytes(), FaceDetector(), FaceRecognizer(), profile)
+    storage.save_avatar(jpeg)
+    print(f"Saved {storage.avatar_path}")
+    if not face_found:
+        print("No face found in the photo; used a centre crop.")
+    elif score is not None:
+        verdict = "matches your enrolled face" if score >= 0.38 else "does NOT look like your enrolled face"
+        print(f"Photo {verdict} (similarity {score:.2f}).")
 
 
 if __name__ == "__main__":

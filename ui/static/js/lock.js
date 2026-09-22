@@ -56,6 +56,14 @@ function onSuccess(data) {
   unlocked = true;
   $("scanBeam").remove();
   setAperture("ok");
+  // The owner's welcome photo replaces the camera, if one is set.
+  const preview = $("lockCameraPreview");
+  const photo = new Image();
+  photo.onload = () => {
+    preview.src = photo.src;
+    preview.style.transform = "none";
+  };
+  photo.src = `/api/profile/photo?t=${Date.now()}`;
   $("unlockCheckmark").classList.replace("hidden", "flex");
   const name = data.display_name || document.body.dataset.displayName;
   setStatus(name ? `Welcome back ${name}` : "Welcome back", "ok");

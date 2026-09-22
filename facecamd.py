@@ -203,6 +203,9 @@ class Scanner:
         threshold = float(settings.get("threshold", 0.38))
         cam_idx = int(settings.get("camera_index", 0))
         base = {"display_name": name, "max_attempts": max_attempts}
+        if profile and storage.has_avatar():
+            # Sent up front so the lock screen can decode it before a match.
+            base["avatar"] = str(storage.avatar_path)
 
         try:
             TOKEN_PATH.unlink()

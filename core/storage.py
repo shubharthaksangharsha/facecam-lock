@@ -17,6 +17,7 @@ import numpy as np
 
 CONFIG_DIR = Path.home() / ".config" / "facecam-lock"
 PROFILE_PATH = CONFIG_DIR / "profile.json"
+AVATAR_PATH = CONFIG_DIR / "avatar.jpg"
 SETTINGS_PATH = CONFIG_DIR / "config.json"
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}") / "facecam-lock"
 
@@ -144,8 +145,26 @@ class StorageManager:
             print(f"[Storage] Error saving profile: {e}")
             return False
 
+    @property
+    def avatar_path(self) -> Path:
+        return self.config_dir / "avatar.jpg"
+
+    def has_avatar(self) -> bool:
+        return self.avatar_path.exists()
+
+    def save_avatar(self, jpeg: bytes) -> None:
+        tmp = self.avatar_path.with_suffix(".jpg.tmp")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, jpeg)
+        finally:
+            os.close(fd)
+        os.replace(tmp, self.avatar_path)
+
     def delete_profile(self) -> bool:
         try:
+            # The photo belongs to the enrolled face; it goes with it.
+            self.avatar_path.unlink(missing_ok=True)
             self.profile_path.unlink(missing_ok=True)
             self._profile_cache = None
             return True

@@ -39,6 +39,10 @@ Item {
   property string previewPath: ""
   property int previewTick: 0
   property bool passwordPanelOpen: false
+  property string avatarPath: ""
+  property string previewFaceState: "scanning"
+  property int faceAttempt: 1
+  property int faceMaxAttempts: 3
   property string pendingFaceCommand: ""
   property bool faceDaemonStartRequested: false
   property double faceEndedAt: 0
@@ -179,6 +183,15 @@ Item {
     Qt.callLater(startFingerprint)
   }
 
+  function retryFace() {
+    if (!lockRequested || faceState === "scanning" || faceState === "matched") return
+    runWake()
+    faceEndedAt = 0
+    faceAttempt = 1
+    startFaceSession(false)
+    Qt.callLater(startFingerprint)
+  }
+
   function applyFaceMessage(line) {
     var msg
     try {
@@ -196,6 +209,9 @@ Item {
     faceState = msg.state
     faceMessage = msg.message || ""
     if (msg.display_name) displayName = msg.display_name
+    avatarPath = msg.avatar || ""
+    if (msg.attempt) faceAttempt = msg.attempt
+    if (msg.max_attempts) faceMaxAttempts = msg.max_attempts
     if (faceFailedState || faceState === "matched") faceEndedAt = Date.now()
     if (faceFailedState) {
       passwordPanelOpen = true
@@ -370,7 +386,11 @@ Item {
         displayName: root.displayName
         previewPath: root.previewPath
         previewTick: root.previewTick
+        avatarPath: root.avatarPath
+        faceAttempt: root.faceAttempt
+        faceMaxAttempts: root.faceMaxAttempts
         passwordPanelOpen: root.passwordPanelOpen
+        onRetryRequested: root.retryFace()
         onPasswordTextEdited: function(password) { root.enteredPassword = password }
         onSubmitPassword: function(password) { root.submitPassword(password) }
         onClearFailureRequested: root.failureMessage = ""
@@ -402,11 +422,14 @@ Item {
       inputEnabled: false
       loadBackground: root.previewVisible
       passwordText: ""
-      faceState: "scanning"
-      faceMessage: "Looking for your face…"
+      faceState: root.previewFaceState
+      faceMessage: ""
       displayName: root.displayName
-      previewPath: root.previewPath
-      previewTick: root.previewTick
+      previewPath: root.facePreviewPath
+      previewTick: root.previewTick + 1
+      avatarPath: root.home + "/.config/facecam-lock/avatar.jpg"
+      faceAttempt: 1
+      faceMaxAttempts: root.faceMaxAttempts
     }
 
     MouseArea {
@@ -695,6 +718,7 @@ Item {
     }
 
     function preview(): string {
+      root.previewFaceState = "scanning"
       root.refreshBackground()
       root.refreshFingerprintStatus()
       root.previewVisible = true
@@ -703,6 +727,14 @@ Item {
 
     function hidePreview(): string {
       root.previewVisible = false
+      return "ok"
+    }
+
+    // Preview a face state without locking: scanning | matched | failed | no_profile
+    function previewFace(state: string): string {
+      root.previewFaceState = state
+      root.refreshBackground()
+      root.previewVisible = true
       return "ok"
     }
   }

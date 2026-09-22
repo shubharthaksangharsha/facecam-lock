@@ -17,6 +17,17 @@ omarchy plugin add https://github.com/shubharthaksangharsha/facecam-lock --enabl
 facecam-lock          # open the Face Studio and enroll your face
 ```
 
+Add a **welcome photo**: it replaces the camera with your picture and a check badge
+once your face is recognised, and never appears for anyone else:
+
+```bash
+facecam-lock photo ~/Pictures/me.jpg   # cropped around your face, kept in ~/.config/facecam-lock (0600)
+```
+
+(or use **Welcome photo → Change** in the Face Studio). Preview any lock state
+without locking: `omarchy-shell lock previewFace matched|failed|scanning`, then
+`omarchy-shell lock hidePreview`.
+
 `install.sh` is idempotent. It:
 
 1. installs `python-opencv` / `python-numpy` if missing and creates a venv in

@@ -91,10 +91,15 @@ const stream = {
   frames: 0,
   fpsAt: performance.now(),
 
+  lastFaceAt: 0,
+
   sync() {
     const wanted = state.tab === "studio" && !document.hidden;
     $("cameraPaused").classList.toggle("hidden", wanted);
     $("cameraPaused").classList.toggle("flex", !wanted);
+    canvas.parentElement.classList.toggle("is-resting", !wanted);
+    if (!wanted) setNoFace(false);
+    else this.lastFaceAt = performance.now();
     if (wanted === this.wanted) return;
     this.wanted = wanted;
     wanted ? this.open() : this.close();
@@ -164,6 +169,11 @@ const stream = {
     drawHUD(header);
     updateMeter(header.best_similarity, header.threshold);
 
+    // Debounced so a single missed detection doesn't flash the hint.
+    const nowMs = performance.now();
+    if (header.faces && header.faces.length) this.lastFaceAt = nowMs;
+    setNoFace(nowMs - this.lastFaceAt > 1200);
+
     this.frames++;
     const now = performance.now();
     if (now - this.fpsAt > 1000) {
@@ -231,6 +241,13 @@ function updateMeter(sim, threshold) {
     (sim >= threshold ? "bg-ok" : sim >= threshold - 0.1 ? "bg-warn" : "bg-bad");
 }
 
+let noFaceShown = false;
+function setNoFace(show) {
+  if (show === noFaceShown) return;
+  noFaceShown = show;
+  $("noFaceChip").classList.toggle("show", show);
+}
+
 function setCameraPill(on) {
   const pill = $("connectionStatus");
   pill.className = `pill ${on ? "border-ok/40 bg-ok/10 text-ok" : "border-line text-muted"}`;
@@ -255,8 +272,59 @@ function renderProfile() {
   $("profileUsername").textContent = p.display_name;
   $("profileSampleCount").textContent = `${p.sample_count} photos trained`;
   $("profileDate").textContent = p.created_at ? `Enrolled ${new Date(p.created_at).toLocaleDateString()}` : "";
-  if (p.avatar_base64) $("profileAvatar").src = p.avatar_base64;
   $("profileRetrainHint").classList.toggle("hidden", p.sample_count >= MIN_ENROLL_SAMPLES);
+
+  const photo = $("profilePhoto");
+  if (p.photo_version) {
+    const url = `/api/profile/photo?v=${p.photo_version}`;
+    photo.src = url;
+    $("profileAvatar").src = url;
+  } else if (p.avatar_base64) {
+    $("profileAvatar").src = p.avatar_base64;
+  }
+  photo.classList.toggle("hidden", !p.photo_version);
+  $("profilePhotoEmpty").classList.toggle("hidden", !!p.photo_version);
+}
+
+/* ---------- welcome photo ---------- */
+
+function pickPhoto() {
+  $("photoInput").value = "";
+  $("photoInput").click();
+}
+
+function onPhotoChosen() {
+  const file = $("photoInput").files[0];
+  if (!file) return;
+  if (file.size > 15 * 1024 * 1024) return toast("Photo is larger than 15 MB", "warn");
+  const reader = new FileReader();
+  reader.onload = () => {
+    state.pendingPhoto = reader.result;
+    state.studioPassword ? uploadPhoto() : requestStudioPassword("photo");
+  };
+  reader.readAsDataURL(file);
+}
+
+async function uploadPhoto() {
+  const image = state.pendingPhoto;
+  state.pendingPhoto = null;
+  if (!image) return;
+  const btn = $("changePhotoBtn");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    const data = await api("/api/profile/photo", { password: state.studioPassword, image });
+    if (!data.face_found) toast("No face found in that photo — used a centre crop", "warn");
+    else if (data.similarity !== null && data.similarity < 0.38) toast("Saved, but that photo doesn't look like your enrolled face", "warn");
+    else toast("Welcome photo updated", "ok");
+    await loadStatus();
+  } catch (err) {
+    if (/password/i.test(err.message)) state.studioPassword = "";
+    toast(err.message, "bad");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Change";
+  }
 }
 
 /* ---------- training password ---------- */
@@ -298,7 +366,9 @@ async function submitStudioPassword(event) {
     closeStudioPassword();
     const action = state.pendingAction;
     state.pendingAction = null;
-    action === "delete" ? deleteProfile() : startEnrollment();
+    if (action === "delete") deleteProfile();
+    else if (action === "photo") uploadPhoto();
+    else startEnrollment();
   } catch (err) {
     $("studioPasswordError").textContent = err.message;
   }
@@ -500,6 +570,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("studioPasswordForm").onsubmit = submitStudioPassword;
   $("studioPasswordCancel").onclick = closeStudioPassword;
   $("saveSettingsBtn").onclick = saveSettings;
+  $("changePhotoBtn").onclick = pickPhoto;
+  $("photoInput").onchange = onPhotoChosen;
   $("settingThreshold").oninput = (e) => ($("thresholdValue").textContent = Number(e.target.value).toFixed(2));
   $("testLockScreenBtn").onclick = () => window.open("/lock", "_blank");
   $("triggerSystemLockBtn").onclick = () => api("/api/system/lock", {}).catch((e) => toast(e.message, "bad"));

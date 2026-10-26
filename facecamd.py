@@ -9,7 +9,12 @@ streams status lines back while it matches faces.
 
 Protocol (newline-delimited):
   client -> daemon : scan | rescan | stop | status | ping
-  daemon -> client : JSON objects, {"t":"status",...} or {"t":"frame","n":<seq>}
+                     or a JSON object for the Face Unlock settings panel:
+                     {"cmd":"people"} {"cmd":"enroll","id":..,"name":..} {"cmd":"enroll_stop"}
+                     {"cmd":"photo","id":..,"path":..} {"cmd":"rename","id":..,"name":..}
+                     {"cmd":"remove","id":..} {"cmd":"set","key":..,"value":..}
+  daemon -> client : JSON objects, {"t":"status",...}, {"t":"frame","n":<seq>},
+                     {"t":"enroll",...}, {"t":"people",...} or {"t":"result",...}
 
 Files in $XDG_RUNTIME_DIR/facecam-lock (tmpfs):
   preview.jpg   latest downscaled camera frame
@@ -35,8 +40,10 @@ os.environ.setdefault("OPENCV_LOG_LEVEL", "ERROR")
 import cv2
 import numpy as np
 
+from core.avatar import make_avatar
 from core.camera import CameraManager, scale_to_width
 from core.detector import FaceDetector, scale_raw_face
+from core.enroll import Enroller, person_id_for, save_enrollment
 from core.recognizer import FaceRecognizer
 from core.storage import StorageManager, ensure_runtime_dir, RUNTIME_DIR
 
@@ -49,6 +56,21 @@ DETECT_WIDTH = 320
 PREVIEW_QUALITY = 60
 PREVIEW_INTERVAL = 0.028  # just under the sensor's 33 ms so no frame is skipped by jitter
 SUSPEND_GAP_SEC = 1.0
+
+# (prompt, captures) for a guided enrollment; small head movements give the
+# profile enough variety to match at the angles a laptop camera sees.
+ENROLL_POSES = [
+    ("Look straight at the camera", 3),
+    ("Turn your head slightly left", 2),
+    ("Turn your head slightly right", 2),
+    ("Tilt your chin up a little", 2),
+    ("Tilt your chin down a little", 2),
+    ("Now smile", 2),
+]
+ENROLL_TIME_LIMIT_SEC = 45.0
+ENROLL_POSE_MAX_SEC = 6.0
+ENROLL_CAPTURE_GAP_SEC = 0.35
+SETTABLE = {"enable_face_unlock": bool, "lock_on_startup": bool}
 
 cv2.setNumThreads(max(1, min(4, os.cpu_count() or 1)))
 
@@ -137,6 +159,7 @@ class Scanner:
         self.thread = None
         self.cancel = threading.Event()
         self.release_timer = None
+        self.mode = "scan"
         self._warm_up()
 
     def _warm_up(self):
@@ -153,19 +176,38 @@ class Scanner:
 
     def request(self, force: bool = False):
         with self.lock:
-            if self.scanning and not force:
+            if self.scanning and self.mode == "scan" and not force:
                 self.hub.broadcast(self.hub.last_status)
                 return
             self._cancel_release_timer()
             if self.scanning:
+                # The lock screen always wins over an enrollment in progress.
                 self._cancel_locked()
             # A camera still warm from a failed scan is reused as-is: no 0.7 s start.
-            self.cancel = threading.Event()
-            self.thread = threading.Thread(target=self._run, args=(self.cancel,), daemon=True)
-            self.thread.start()
+            self._start("scan", self._run)
+
+    def request_enroll(self, person_id: str, name: str):
+        with self.lock:
+            self._cancel_release_timer()
+            if self.scanning:
+                self._cancel_locked()
+            self._start("enroll", lambda cancel: self._run_enroll(cancel, person_id, name))
+
+    def stop_enroll(self):
+        with self.lock:
+            if self.scanning and self.mode == "enroll":
+                self._cancel_locked()
+
+    def _start(self, mode: str, target):
+        self.mode = mode
+        self.cancel = threading.Event()
+        self.thread = threading.Thread(target=target, args=(self.cancel,), daemon=True)
+        self.thread.start()
 
     def stop(self):
         with self.lock:
+            if self.mode == "enroll" and self.scanning:
+                return
             self._cancel_release_timer()
             self._cancel_locked()
         self.hub.status(state="idle", message="")
@@ -197,13 +239,7 @@ class Scanner:
     def _open_camera(self, index: int) -> bool:
         if self.camera.start(device_index=index):
             return True
-        # The Face Studio server may be holding the webcam.
-        try:
-            import urllib.request
-            req = urllib.request.Request("http://127.0.0.1:8765/api/camera/release", method="POST")
-            urllib.request.urlopen(req, timeout=0.4)
-        except Exception:
-            pass
+        # A camera released a moment ago can still be busy for a few frames.
         time.sleep(0.15)
         return self.camera.start(device_index=index)
 
@@ -334,6 +370,168 @@ class Scanner:
             if not restart:
                 return
 
+    # ---------------------------------------------------------------- enrollment
+    def _enroll_msg(self, **fields):
+        self.hub.broadcast({"t": "enroll", **fields})
+
+    def _run_enroll(self, cancel: threading.Event, person_id: str, name: str):
+        base = {"person": person_id, "name": name, "target": sum(n for _, n in ENROLL_POSES)}
+        try:
+            self._enroll(cancel, person_id, name, base)
+        except Exception as e:
+            log(f"enroll crashed: {e!r}")
+            self._enroll_msg(state="error", message="Something went wrong; try again", **base)
+        finally:
+            self.camera.stop(force=True)
+
+    def _enroll(self, cancel: threading.Event, person_id: str, name: str, base: dict):
+        settings = self.storage.get_settings()
+        self._enroll_msg(state="starting", message="Starting camera…", count=0, **base)
+        if not self._open_camera(int(settings.get("camera_index", 0))):
+            self._enroll_msg(state="error", message="Camera unavailable", **base)
+            return
+
+        # Faces of everyone else are ignored, so the owner can sit beside a new person.
+        others = [p for p in self.storage.list_people() if p["id"] != person_id]
+        enroller = Enroller(self.detector, self.recognizer, others)
+        seq = 0
+        last_preview = last_take = 0.0
+        best_frame, best_score = None, 0.0
+        pose_index, pose_taken = 0, 0
+        started = pose_started = time.monotonic()
+        prompt = ENROLL_POSES[0][0]
+        hint = ""
+
+        def next_pose(now):
+            nonlocal pose_index, pose_taken, pose_started, prompt
+            pose_index, pose_taken, pose_started = pose_index + 1, 0, now
+            if pose_index < len(ENROLL_POSES):
+                prompt = ENROLL_POSES[pose_index][0]
+
+        while not cancel.is_set() and pose_index < len(ENROLL_POSES):
+            now = time.monotonic()
+            if now - started > ENROLL_TIME_LIMIT_SEC:
+                break
+            if pose_taken > 0 and now - pose_started > ENROLL_POSE_MAX_SEC:
+                next_pose(now)
+                continue
+            seq, frame = self.camera.wait_frame(seq, timeout=0.5)
+            if frame is None:
+                continue
+
+            small = scale_to_width(frame, DETECT_WIDTH)
+            faces = self.detector.detect(small, compute_quality=False)
+            if now - last_preview >= PREVIEW_INTERVAL:
+                last_preview = now
+                ok, jpg = cv2.imencode(".jpg", small, [int(cv2.IMWRITE_JPEG_QUALITY), PREVIEW_QUALITY])
+                if ok:
+                    write_atomic(PREVIEW_PATH, jpg.tobytes(), 0o600)
+                    msg = {"t": "frame", "n": seq}
+                    if faces:
+                        h, w = small.shape[:2]
+                        x, y, fw, fh = faces[0]["box"]
+                        msg["face"] = [round(x / w, 3), round(y / h, 3), round(fw / w, 3), round(fh / h, 3)]
+                    self.hub.broadcast(msg)
+
+            if not faces or now - last_take < ENROLL_CAPTURE_GAP_SEC:
+                continue
+            last_take = now
+            if enroller.add_image(frame.copy(), f"{prompt} #{pose_taken + 1}"):
+                hint = ""
+                sample_score = enroller.samples[-1]["score"]
+                if pose_index == 0 and sample_score > best_score:
+                    best_frame, best_score = frame.copy(), sample_score
+                pose_taken += 1
+                if pose_taken >= ENROLL_POSES[pose_index][1]:
+                    next_pose(now)
+            else:
+                skip = enroller.last_skip
+                hint = ("That's " + skip.split(":", 1)[1] + ". Only " + name + " should be in view"
+                        if skip.startswith("known:") else
+                        "Only one face should be in view" if skip == "multiple" else
+                        "Move a little closer")
+            self._enroll_msg(state="capturing", message=prompt, hint=hint,
+                             count=len(enroller.samples), **base)
+
+        if cancel.is_set():
+            self._enroll_msg(state="cancelled", message="Cancelled", **base)
+            return
+        self.camera.stop(force=True)
+        self._enroll_msg(state="saving", message="Saving…", count=len(enroller.samples), **base)
+
+        avatar = None
+        existing = next((p for p in self.storage.list_people() if p["id"] == person_id), None)
+        if best_frame is not None and not (existing and existing["avatar"]):
+            ok, jpg = cv2.imencode(".jpg", best_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            if ok:
+                avatar = make_avatar(jpg.tobytes(), self.detector)[0]
+        try:
+            profile, dropped, _ = save_enrollment(self.storage, enroller, person_id, name, avatar)
+        except ValueError as e:
+            self._enroll_msg(state="error", message=str(e), count=len(enroller.samples), **base)
+            return
+        log(f"enrolled {person_id} with {profile['sample_count']} samples (dropped {dropped})")
+        self._enroll_msg(state="done", message=f"{name} can now unlock with their face",
+                         count=profile["sample_count"], **base)
+        self.hub.broadcast(self.people())
+
+    # ---------------------------------------------------------------- management
+    def people(self) -> dict:
+        settings = self.storage.get_settings()
+        return {
+            "t": "people",
+            "people": [{"id": p["id"], "name": p["display_name"], "owner": p["id"] == "owner",
+                        "samples": len(p["profile"].get("exemplars", [])), "avatar": p["avatar"] or ""}
+                       for p in self.storage.list_people()],
+            "settings": {key: bool(settings.get(key, False)) for key in SETTABLE},
+        }
+
+    def manage(self, req: dict) -> dict:
+        cmd = req.get("cmd")
+        pid = str(req.get("id") or "")
+        storage = self.storage
+        known = {p["id"]: p for p in storage.list_people()}
+        if cmd == "photo":
+            if pid not in known:
+                return {"ok": False, "message": "Enroll this person first"}
+            path = os.path.expanduser(str(req.get("path") or "").strip())
+            try:
+                with open(path, "rb") as handle:
+                    data = handle.read(40 * 1024 * 1024)
+                jpeg, score, found = make_avatar(data, self.detector, self.recognizer, known[pid]["profile"])
+            except (OSError, ValueError):
+                return {"ok": False, "message": "Couldn't read that image"}
+            storage.save_person_avatar(pid, jpeg)
+            if not found:
+                return {"ok": True, "message": "Photo saved (no face found, used the centre)"}
+            if score is not None and score < 0.38:
+                return {"ok": True, "message": "Photo saved, but it doesn't look much like " + known[pid]["display_name"]}
+            return {"ok": True, "message": "Photo saved"}
+        if cmd == "rename":
+            name = str(req.get("name") or "").strip()[:40]
+            if pid not in known or not name:
+                return {"ok": False, "message": "Enter a name"}
+            profile = dict(known[pid]["profile"], display_name=name)
+            if pid == "owner":
+                storage.save_profile(profile)
+                storage.save_settings({"display_name": name})
+            else:
+                storage.save_person(pid, profile)
+            return {"ok": True, "message": "Renamed to " + name}
+        if cmd == "remove":
+            if pid == "owner":
+                ok = storage.delete_profile()
+            else:
+                ok = storage.delete_person(pid)
+            return {"ok": ok, "message": "Removed" if ok else "Nothing to remove"}
+        if cmd == "set":
+            key = req.get("key")
+            if key not in SETTABLE:
+                return {"ok": False, "message": "Unknown setting"}
+            storage.save_settings({key: SETTABLE[key](req.get("value"))})
+            return {"ok": True, "message": ""}
+        return {"ok": False, "message": "Unknown command"}
+
 
 class Server:
     def __init__(self):
@@ -346,6 +544,9 @@ class Server:
         try:
             with conn.makefile("r", encoding="utf-8", errors="ignore") as reader:
                 for line in reader:
+                    if line.startswith("{"):
+                        self.handle_json(conn, line)
+                        continue
                     cmd = line.strip().lower()
                     if cmd == "scan":
                         self.scanner.request()
@@ -365,6 +566,38 @@ class Server:
                 conn.close()
             except OSError:
                 pass
+
+    def handle_json(self, conn, line: str):
+        try:
+            req = json.loads(line)
+        except ValueError:
+            return
+        if not isinstance(req, dict):
+            return
+        cmd = req.get("cmd")
+        scanner = self.scanner
+        if cmd == "people":
+            self.hub._send(conn, scanner.people())
+        elif cmd == "enroll":
+            name = str(req.get("name") or "").strip()[:40]
+            pid = str(req.get("id") or "") or person_id_for(name)
+            if pid == "owner" and not name:
+                name = scanner.storage.get_display_name()
+            if not name:
+                self.hub._send(conn, {"t": "result", "cmd": cmd, "ok": False, "message": "Enter a name"})
+                return
+            scanner.request_enroll(pid, name)
+        elif cmd == "enroll_stop":
+            scanner.stop_enroll()
+        else:
+            try:
+                result = scanner.manage(req)
+            except Exception as e:
+                log(f"{cmd} failed: {e!r}")
+                result = {"ok": False, "message": "That didn't work"}
+            self.hub._send(conn, {"t": "result", "cmd": cmd, **result})
+            if result.get("ok"):
+                self.hub.broadcast(scanner.people())
 
     def serve(self):
         ensure_runtime_dir()

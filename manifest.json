@@ -2,15 +2,19 @@
   "schemaVersion": 1,
   "id": "facecam.lock",
   "name": "FaceCam Lock",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "author": "Shubharthak Sangharsha",
-  "description": "Omarchy lock screen with webcam face unlock, a live camera preview, and password fallback.",
+  "license": "MIT",
+  "homepage": "https://github.com/shubharthaksangharsha/facecam-lock",
+  "description": "Omarchy lock screen with webcam face unlock, a live camera preview, a native enroll overlay, and password fallback.",
   "kinds": [
-    "service"
+    "service",
+    "overlay"
   ],
   "keepLoaded": true,
   "entryPoints": {
-    "service": "Service.qml"
+    "service": "Service.qml",
+    "overlay": "setup/FaceSetup.qml"
   },
   "omarchy": {
     "clonedFrom": "omarchy.lock"

@@ -1,0 +1,11 @@
+[Unit]
+Description=Reseal FaceCam Lock LUKS TPM slot to this boot
+After=cryptsetup.target
+ConditionPathExists=/etc/facecam-lock/boot-unlock.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/facecam-lock/tpm-reseal
+
+[Install]
+WantedBy=multi-user.target

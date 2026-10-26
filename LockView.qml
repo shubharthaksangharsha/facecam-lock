@@ -61,7 +61,7 @@ Item {
   }
   readonly property string statusDetail: {
     if (matched) return "Unlocking…"
-    if (faceState === "no_profile") return "Open FaceCam Lock to enroll, or type your password"
+    if (faceState === "no_profile") return "Set it up in the Omarchy menu, or type your password"
     if (faceFailed) return "Tap the camera to try again, or type your password"
     if (scanning && (!frameReady || awaitingFrame)) return "Starting camera…"
     if (scanning && faceAttempt > 1) return "Attempt " + faceAttempt + " of " + faceMaxAttempts

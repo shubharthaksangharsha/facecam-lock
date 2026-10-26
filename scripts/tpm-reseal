@@ -1,0 +1,35 @@
+#!/bin/bash
+# FaceCam Lock: keep the TPM2 slot of the LUKS root sealed to this machine's
+# boot state. Runs as root at every boot (facecam-tpm-reseal.service).
+#
+# The slot is bound to PCR 4+7 (boot loader + Secure Boot policy). Sealing
+# only happens when Secure Boot is on. PCR 4 distinguishes Limine from the
+# Ubuntu shim on a dual-boot disk; after a Limine update the slot fails once
+# and this unit re-seals it.
+set -euo pipefail
+
+CONF=/etc/facecam-lock/boot-unlock.conf
+KEY=/etc/facecam-lock/tpm-reseal.key
+EFIVARS=/sys/firmware/efi/efivars
+GLOBAL=8be4df61-93ca-11d2-aa0d-00e098032b8c
+
+[[ -r $CONF && -r $KEY ]] || exit 0
+# shellcheck source=/dev/null
+. "$CONF"
+: "${DEVICE:?}" "${PCRS:=7}"
+
+efivar() { od -An -t u1 -j4 -N1 "$EFIVARS/$1-$GLOBAL" 2>/dev/null | tr -d ' '; }
+
+if [[ $(efivar SecureBoot) != 1 || $(efivar SetupMode) == 1 ]]; then
+  echo "Secure Boot is not enforcing; leaving the TPM slot alone (disk password stays required)."
+  exit 0
+fi
+
+if cryptsetup luksDump "$DEVICE" | grep -q 'systemd-tpm2' &&
+  cryptsetup open --test-passphrase --token-only --token-type systemd-tpm2 "$DEVICE" 2>/dev/null; then
+  exit 0
+fi
+
+echo "Sealing the disk key to the TPM for this boot state (PCR $PCRS)."
+systemd-cryptenroll "$DEVICE" --unlock-key-file="$KEY" --wipe-slot=tpm2 \
+  --tpm2-device=auto --tpm2-pcrs="$PCRS"

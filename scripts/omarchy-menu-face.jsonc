@@ -1,0 +1,3 @@
+  "setup.security.face": {"icon":"󰄀","label":"Face Unlock","action":"omarchy-shell shell summon facecam.lock '{}'","description":"Enroll faces, welcome photos and face-lock settings"},
+  "setup.security.face-boot": {"icon":"󰌾","label":"Face Unlock at Boot","action":"omarchy-launch-floating-terminal-with-presentation facecam-lock boot enable","description":"TPM-unlock the disk so the face lock is the first prompt"},
+  "remove.security.face-boot": {"icon":"󰌾","label":"Face Unlock at Boot","when":"test -f /etc/facecam-lock/boot-unlock.conf","action":"omarchy-launch-floating-terminal-with-presentation facecam-lock boot disable"}

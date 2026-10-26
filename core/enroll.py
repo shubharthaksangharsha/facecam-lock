@@ -7,9 +7,11 @@ exactly one unknown face remains. Outliers that don't agree with the rest of the
 set are dropped, so a stray photo of someone else doesn't poison the profile.
 """
 
+import getpass
+import re
 import time
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -17,9 +19,11 @@ import numpy as np
 from .camera import scale_to_width
 from .detector import FaceDetector, scale_raw_face
 from .recognizer import FaceRecognizer
+from .storage import MIN_ENROLL_SAMPLES
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
 KNOWN_FACE_SIMILARITY = 0.42   # a face this close to an enrolled person is theirs
+KNOWN_PERSON_WARNING = 0.45    # a whole profile this close to someone else is refused
 OUTLIER_SIMILARITY = 0.30      # samples below this vs the rest are dropped
 MIN_FACE_PX = 80
 MIN_DETECTION_SCORE = 0.8
@@ -37,12 +41,15 @@ class Enroller:
         self.known = known_people
         self.samples: List[Dict] = []
         self.log: List[str] = []
+        # Why the last add_image() was refused: "none", "multiple" or "known:<name>".
+        self.last_skip = ""
 
     def _unknown_faces(self, image: np.ndarray):
         """(embedding, face) for every sufficiently large face that isn't an enrolled person."""
         small = scale_to_width(image, 1280)
         factor = image.shape[1] / float(small.shape[1])
         found = []
+        self.last_skip = "none"
         for face in self.detector.detect(small, compute_quality=False):
             if face["score"] < MIN_DETECTION_SCORE or face["box"][2] * factor < MIN_FACE_PX:
                 continue
@@ -53,6 +60,7 @@ class Enroller:
             if self.known:
                 _, score, person = self.recognizer.match_people(emb, self.known, KNOWN_FACE_SIMILARITY)
                 if score >= KNOWN_FACE_SIMILARITY:
+                    self.last_skip = f"known:{person['display_name']}"
                     continue
             box = [int(v * factor) for v in face["box"]]
             found.append((emb, box, face["score"]))
@@ -61,8 +69,11 @@ class Enroller:
     def add_image(self, image: np.ndarray, source: str) -> bool:
         faces = self._unknown_faces(image)
         if len(faces) != 1:
+            if len(faces) > 1:
+                self.last_skip = "multiple"
             self.log.append(f"skip {source}: {'no usable face' if not faces else f'{len(faces)} unknown faces'}")
             return False
+        self.last_skip = ""
         emb, (x, y, w, h), score = faces[0]
         pad = int(max(w, h) * 0.3)
         crop = image[max(0, y - pad):y + h + pad, max(0, x - pad):x + w + pad]
@@ -139,3 +150,33 @@ class Enroller:
             return None
         _, score, person = self.recognizer.match_people(np.asarray(profile["centroid"], np.float32), self.known)
         return person["display_name"], score
+
+
+def person_id_for(name: str) -> str:
+    return re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-")[:32] or "person"
+
+
+def save_enrollment(storage, enroller: Enroller, person_id: str, name: str,
+                    avatar_jpeg: Optional[bytes] = None) -> Tuple[Dict, int, Optional[tuple]]:
+    """Validate the captured samples and store the profile.
+
+    Returns (profile, dropped outliers, closest other person). Raises ValueError
+    with a message fit for the user when the samples can't be used.
+    """
+    dropped = enroller.prune_outliers()
+    if len(enroller.samples) < MIN_ENROLL_SAMPLES:
+        raise ValueError(f"Only {len(enroller.samples)} good captures (need {MIN_ENROLL_SAMPLES})")
+    profile = enroller.build_profile(name)
+    closest = enroller.closest_known(profile)
+    if closest and closest[1] >= KNOWN_PERSON_WARNING:
+        raise ValueError(f"These captures look like {closest[0]}; nothing was saved")
+    if person_id == "owner":
+        profile["username"] = getpass.getuser()
+        if not storage.save_profile(profile):
+            raise ValueError("Could not write the face profile")
+        storage.save_settings({"display_name": name})
+        if avatar_jpeg:
+            storage.save_avatar(avatar_jpeg)
+    else:
+        storage.save_person(person_id, profile, avatar_jpeg)
+    return profile, dropped, closest

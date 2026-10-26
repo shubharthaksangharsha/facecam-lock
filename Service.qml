@@ -35,7 +35,7 @@ Item {
   property bool strandedLockResolved: false
   property string faceState: "idle"
   property string faceMessage: ""
-  property string displayName: "Shubharthak"
+  property string displayName: ""
   property string previewPath: ""
   property int previewTick: 0
   property bool passwordPanelOpen: false
@@ -582,6 +582,22 @@ Item {
     }
   }
 
+  // "Face lock at startup": with the disk unlocked by the TPM and SDDM logging in
+  // automatically, this lock is what guards the session after boot. The marker on
+  // tmpfs makes it once per boot, so a shell restart doesn't lock again.
+  property bool startupLockChecked: false
+  Process {
+    id: startupLockProc
+    command: ["bash", "-c", "m=\"$XDG_RUNTIME_DIR/facecam-lock/startup-locked\"; [[ -e $m ]] && exit 1; grep -Eq '\"lock_on_startup\": *true' \"$HOME/.config/facecam-lock/config.json\" 2>/dev/null || exit 1; mkdir -p \"${m%/*}\" && touch \"$m\""]
+    onExited: function(exitCode) {
+      root.startupLockChecked = true
+      if (exitCode === 0 && !root.locked) {
+        root.logEvent("startup-lock")
+        root.beginLock()
+      }
+    }
+  }
+
   Process {
     id: wakeProcess
     command: ["bash", "-c", "omarchy-system-wake"]
@@ -676,6 +692,7 @@ Item {
   onPasswordPamConfiguredChanged: {
     if (!passwordPamConfigured) return
 
+    if (!startupLockProc.running && !startupLockChecked) startupLockProc.running = true
     strandedLock = false
     strandedLockResolved = false
     strandedLockRetryTimer.rearm()

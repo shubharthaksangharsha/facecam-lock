@@ -4,7 +4,7 @@
 #   omarchy plugin add https://github.com/shubharthaksangharsha/facecam-lock --enable
 #   ~/.config/omarchy/plugins/facecam.lock/install.sh
 #
-# or from a git checkout anywhere: ./install.sh
+# or from a git checkout: ./install.sh
 # Safe to re-run; each step skips work that is already done.
 set -euo pipefail
 
@@ -16,6 +16,7 @@ VENV="$DATA_DIR/venv"
 PAM_HELPER="/usr/local/lib/facecam-lock/pam-auth"
 PAM_FILE="/etc/pam.d/omarchy-lock-fingerprint"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+MENU_EXT="${XDG_CONFIG_HOME:-$HOME/.config}/omarchy/extensions/omarchy-menu.jsonc"
 
 step() { printf '\n\033[1;36m==>\033[0m %s\n' "$*"; }
 ok() { printf '    \033[32m✓\033[0m %s\n' "$*"; }
@@ -32,9 +33,7 @@ ok "OpenCV $(python3 -c 'import cv2; print(cv2.__version__)')"
 step "Python environment ($VENV)"
 mkdir -p "$DATA_DIR"
 [[ -x $VENV/bin/python ]] || python3 -m venv --system-site-packages "$VENV"
-"$VENV/bin/python" -c 'import fastapi, uvicorn, jinja2' 2>/dev/null ||
-  "$VENV/bin/pip" install --quiet --disable-pip-version-check fastapi uvicorn jinja2
-ok "fastapi, uvicorn, jinja2"
+ok "system OpenCV / NumPy"
 
 step "Face models"
 bash "$APP_DIR/scripts/fetch-models.sh" "$APP_DIR/models"
@@ -79,30 +78,57 @@ account    include                     system-local-login
 EOF
 ok "$PAM_FILE"
 
-step "Omarchy lock plugin"
+step "Omarchy plugin"
+chmod +x "$APP_DIR/scripts/boot-unlock.sh" "$APP_DIR/scripts/tpm-reseal"
 if [[ $APP_DIR != "$PLUGIN_DIR" ]]; then
-  # Running from a checkout: copy just the plugin files (the shell refuses symlinks).
-  mkdir -p "$PLUGIN_DIR"
+  # Dev checkout: the shell refuses symlinks, so copy the plugin tree in.
+  # `omarchy plugin add` already lands the git repo at $PLUGIN_DIR.
+  mkdir -p "$PLUGIN_DIR/setup"
   cp "$APP_DIR/manifest.json" "$APP_DIR/Service.qml" "$APP_DIR/LockView.qml" "$PLUGIN_DIR/"
+  cp "$APP_DIR/setup/FaceSetup.qml" "$PLUGIN_DIR/setup/"
 fi
+rm -rf "$HOME/.config/omarchy/plugins/facecam.setup"
 omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
 sleep 0.3
 omarchy plugin enable "$PLUGIN_ID" >/dev/null
-ok "$PLUGIN_ID enabled (replaces the built-in lock; 'omarchy plugin disable $PLUGIN_ID' restores it)"
+ok "$PLUGIN_ID enabled (replaces the built-in lock; disable it to restore the stock lock)"
+
+step "Omarchy menu"
+mkdir -p "$(dirname "$MENU_EXT")"
+if [[ ! -f $MENU_EXT ]]; then
+  printf '{\n}\n' >"$MENU_EXT"
+fi
+if ! grep -q '"setup.security.face"' "$MENU_EXT"; then
+  python3 - "$MENU_EXT" "$APP_DIR/scripts/omarchy-menu-face.jsonc" <<'PY'
+import pathlib, re, sys
+path, snippet = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]).read_text().rstrip() + "\n"
+text = path.read_text()
+idx = text.rfind("}")
+if idx < 0:
+    path.write_text("{\n" + snippet + "}\n")
+else:
+    inner = text[:idx]
+    probe = re.sub(r"//.*?$", "", inner, flags=re.M)
+    probe = re.sub(r"/\*.*?\*/", "", probe, flags=re.S).rstrip()
+    comma = ",\n" if re.search(r'[:\]]\s*$', probe) else ""
+    path.write_text(inner.rstrip() + comma + "\n" + snippet + "}\n")
+PY
+fi
+ok "Setup → Security → Face Unlock"
 
 step "Desktop entry"
 mkdir -p "$HOME/.local/share/applications"
 cat >"$HOME/.local/share/applications/facecam-lock.desktop" <<EOF
 [Desktop Entry]
-Name=FaceCam Lock
-Comment=Train face unlock for the Omarchy lock screen
+Name=Face Unlock
+Comment=Enroll faces and manage face unlock for the Omarchy lock screen
 Exec=$APP_DIR/bin/facecam-lock
 Icon=camera-web
 Terminal=false
 Type=Application
 Categories=Utility;Security;Settings;
-StartupWMClass=FaceCamLock
 EOF
-ok "FaceCam Lock in the app launcher"
+ok "Face Unlock in the app launcher"
 
-printf '\n\033[1;32mDone.\033[0m Run \033[1mfacecam-lock\033[0m to enroll your face, then lock with Super+Ctrl+L.\n'
+printf '\n\033[1;32mDone.\033[0m Open \033[1mSetup → Security → Face Unlock\033[0m (or run \033[1mfacecam-lock\033[0m) to enroll.\n'
+printf 'For face lock at first power-on: \033[1mfacecam-lock boot enable\033[0m (needs the TPM; Secure Boot recommended).\n'

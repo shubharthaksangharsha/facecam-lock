@@ -4,17 +4,12 @@ Profiles and settings live in ~/.config/facecam-lock; per-session lock state
 (preview frames, status, unlock token) lives on tmpfs in $XDG_RUNTIME_DIR.
 """
 
-import base64
-import hmac
 import json
 import os
 import pwd
 import re
 from pathlib import Path
 from typing import Dict, Any, List, Optional
-
-import cv2
-import numpy as np
 
 CONFIG_DIR = Path.home() / ".config" / "facecam-lock"
 PROFILE_PATH = CONFIG_DIR / "profile.json"
@@ -43,9 +38,8 @@ DEFAULT_SETTINGS = {
     "enable_face_unlock": True,
     "enable_lid_open_trigger": True,
     "show_camera_preview_on_lock": True,
-    "studio_password": "",
+    "lock_on_startup": False,
     "display_name": "",
-    "theme": "omarchy",
 }
 
 
@@ -101,16 +95,6 @@ class StorageManager:
             if name:
                 return name
         return str(self.get_settings().get("display_name") or system_display_name())
-
-    def has_studio_password(self) -> bool:
-        return bool(self.get_settings().get("studio_password"))
-
-    def verify_studio_password(self, password: str) -> bool:
-        expected = str(self.get_settings().get("studio_password") or "")
-        if not expected:
-            return False
-        provided = password if isinstance(password, str) else ""
-        return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
 
     def has_profile(self) -> bool:
         return self.profile_path.exists()
@@ -236,6 +220,21 @@ class StorageManager:
         self._people_cache.pop(target.name, None)
         return True
 
+    def save_person_avatar(self, person_id: str, avatar_jpeg: bytes) -> Path:
+        if person_id == "owner":
+            self.save_avatar(avatar_jpeg)
+            return self.avatar_path
+        self.people_dir.mkdir(mode=0o700, exist_ok=True)
+        target = self.people_dir / f"{person_id}.jpg"
+        self._write_private(target, avatar_jpeg)
+        return target
+
+    def get_person_avatar_path(self, person_id: str) -> Optional[Path]:
+        if person_id == "owner":
+            return self.avatar_path if self.has_avatar() else None
+        target = self.people_dir / f"{person_id}.jpg"
+        return target if target.exists() else None
+
     @staticmethod
     def _write_private(path: Path, data: bytes) -> None:
         tmp = path.with_name(path.name + ".tmp")
@@ -245,15 +244,3 @@ class StorageManager:
         finally:
             os.close(fd)
         os.replace(tmp, path)
-
-    @staticmethod
-    def frame_to_jpeg(frame: np.ndarray, quality: int = 80) -> bytes:
-        ok, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
-        return buffer.tobytes() if ok else b""
-
-    @staticmethod
-    def frame_to_base64_jpeg(frame: np.ndarray, quality: int = 85) -> str:
-        data = StorageManager.frame_to_jpeg(frame, quality)
-        if not data:
-            return ""
-        return "data:image/jpeg;base64," + base64.b64encode(data).decode("ascii")

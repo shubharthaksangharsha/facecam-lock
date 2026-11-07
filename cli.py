@@ -15,6 +15,10 @@ facecam-lock command line.
   facecam-lock boot status | enable | disable
                             unlock the disk with the TPM at power-on so the face lock is
                             the only prompt (needs Secure Boot; see README)
+  facecam-lock guard setup [--from ENVFILE | --key KEY ...]
+  facecam-lock guard on | off | status | test [--image FILE ...] | log | clear
+                            anti-spoof: after an unlock, Gemini checks that the face was a live
+                            person and not a phone or photo; if not, the session locks again
 """
 
 import argparse
@@ -154,9 +158,183 @@ def person_command(argv) -> None:
         print(f"Separation from {closest[0]}: similarity {closest[1]:.2f} (lower is better; unlock needs 0.38)")
 
 
+def request_json(payload: dict, wait_for: str, timeout: float = 30.0):
+    """Send one JSON command to the daemon and return its {"t": wait_for} reply."""
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(RUNTIME_DIR / "ctl.sock"))
+            client.sendall((json.dumps(payload) + "\n").encode())
+            with client.makefile("r", encoding="utf-8", errors="ignore") as reader:
+                for line in reader:
+                    try:
+                        msg = json.loads(line)
+                    except ValueError:
+                        continue
+                    if msg.get("t") == wait_for and (msg.get("cmd") in (None, payload.get("cmd"))):
+                        return msg
+    except OSError:
+        pass
+    return None
+
+
+def parse_env_keys(path: Path):
+    keys, models = [], []
+    for line in path.read_text(errors="ignore").splitlines():
+        line = line.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        value = value.strip().strip("'\"")
+        if name.strip() in ("GEMINI_API_KEYS", "GEMINI_API_KEY"):
+            keys += [k.strip() for k in value.split(",") if k.strip()]
+        elif name.strip() == "GUARD_MODELS":
+            models = [m.strip() for m in value.split(",") if m.strip()]
+    return list(dict.fromkeys(keys)), models
+
+
+def key_works(key: str) -> bool:
+    import urllib.request
+    req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1",
+                                 headers={"x-goog-api-key": key})
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True
+    except Exception:
+        return False
+
+
+def guard_command(argv) -> None:
+    """facecam-lock guard ...: the async anti-spoof check."""
+    parser = argparse.ArgumentParser(prog="facecam-lock guard")
+    sub = parser.add_subparsers(dest="action", required=True)
+    setup = sub.add_parser("setup", help="store Gemini API keys and turn the guard on")
+    setup.add_argument("--from", dest="env_file", help="read GEMINI_API_KEYS / GEMINI_API_KEY from this .env file")
+    setup.add_argument("--key", action="append", default=[], help="an API key (repeatable)")
+    setup.add_argument("--models", help="comma separated model chain (default: benchmarked fast chain)")
+    sub.add_parser("on", help="turn the guard on")
+    sub.add_parser("off", help="turn the guard off")
+    sub.add_parser("status", help="show keys, models, last verdict and lockdown state")
+    test = sub.add_parser("test", help="run the check on the camera, or on pictures (no daemon needed)")
+    test.add_argument("--image", nargs="+", help="image files in time order instead of the camera")
+    logp = sub.add_parser("log", help="recent checks")
+    logp.add_argument("-n", type=int, default=15)
+    sub.add_parser("clear", help="end a lockdown without typing the password at the lock screen")
+    args = parser.parse_args(argv)
+
+    from core import guard as G
+    from core.storage import StorageManager
+    storage = StorageManager()
+
+    if args.action == "setup":
+        keys = list(args.key)
+        models = [m.strip() for m in (args.models or "").split(",") if m.strip()]
+        if args.env_file:
+            file_keys, file_models = parse_env_keys(Path(args.env_file).expanduser())
+            keys += file_keys
+            models = models or file_models
+        keys = list(dict.fromkeys(keys)) or G.load_keys()
+        if not keys:
+            sys.exit("No keys found. Use --from FILE or --key KEY (keys: https://aistudio.google.com/apikey).")
+        good = [k for k in keys if key_works(k)]
+        print(f"{len(good)} of {len(keys)} keys work")
+        if not good:
+            sys.exit("None of the keys were accepted by the Gemini API.")
+        G.save_keys(good, models or None)
+        storage.save_settings({"guard_enabled": True})
+        print(f"Saved to {G.KEYS_PATH} (private to you). Guard is on. Models: {', '.join(models or G.DEFAULT_MODELS)}")
+        request_json({"cmd": "guard_reload"}, "result", 3)
+        print("Try it: facecam-lock guard test")
+        return
+
+    if args.action in ("on", "off"):
+        if args.action == "on" and not G.load_keys():
+            sys.exit("Add a Gemini key first: facecam-lock guard setup --from FILE")
+        storage.save_settings({"guard_enabled": args.action == "on"})
+        print(f"Guard {args.action}.")
+        return
+
+    if args.action == "clear":
+        sent = send("guard_clear")
+        (RUNTIME_DIR / "guard.lockdown").unlink(missing_ok=True)
+        print("Lockdown cleared." + ("" if sent else " (daemon not running)"))
+        return
+
+    if args.action == "log":
+        path = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / "facecam-lock" / "guard.jsonl"
+        if not path.exists():
+            sys.exit("No checks yet.")
+        for line in path.read_text().splitlines()[-args.n:]:
+            e = json.loads(line)
+            v = e.get("verdict") or {}
+            detail = (f"{v.get('attack')} {v.get('confidence', 0):.0%} {v.get('ms', 0) / 1000:.1f}s {v.get('model')}"
+                      if v else e.get("note") or e.get("error", ""))
+            print(f"{e['ts']}  {e.get('person', ''):<10} {e['action']:<8} {detail}")
+        return
+
+    if args.action == "status":
+        settings = storage.get_settings()
+        keys = G.load_keys()
+        last = None
+        reply = request_json({"cmd": "people"}, "people", 2)
+        if reply:
+            last = reply.get("guard", {}).get("last")
+        rows = [
+            ("Guard", "on" if settings.get("guard_enabled") and keys else "off"),
+            ("Gemini keys", f"{len(keys)} ({G.KEYS_PATH})" if keys else "none (facecam-lock guard setup)"),
+            ("Models", ", ".join(G.configured_models())),
+            ("Lock back at", f">= {float(settings.get('guard_min_confidence', 0.8)):.0%} confidence"),
+            ("If check fails", "lock" if settings.get("guard_fail_closed") else "stay unlocked"),
+            ("Lockdown", "ON: password only" if (RUNTIME_DIR / "guard.lockdown").exists() else "no"),
+        ]
+        if last:
+            v = last.get("verdict") or {}
+            rows.append(("Last check", f"{last.get('ts')} {last.get('action')} "
+                                       f"{v.get('attack', '')} {v.get('confidence', '')}".strip()))
+        width = max(len(k) for k, _ in rows)
+        for key, value in rows:
+            print(f"{key:<{width}}  {value}")
+        return
+
+    # test
+    if args.image:
+        import cv2
+        frames = []
+        for name in args.image:
+            frame = cv2.imread(str(Path(name).expanduser()))
+            if frame is None:
+                sys.exit(f"Can't read {name}")
+            frames.append(frame)
+        g = G.Guard()
+        if not g.ready:
+            sys.exit("No Gemini key. Run: facecam-lock guard setup --from FILE")
+        try:
+            verdict = g.verify(G.encode_frames(frames))
+        except G.GuardError as e:
+            sys.exit(f"Check failed: {e}")
+        fishy = G.is_fishy(verdict, float(storage.get_settings().get("guard_min_confidence", 0.8)))
+        print(f"{'WOULD LOCK' if fishy else 'live person'}: {verdict.attack}, confidence {verdict.confidence:.0%}, "
+              f"{verdict.ms / 1000:.1f} s via {verdict.model}\n  {verdict.reason}")
+        sys.exit(1 if fishy else 0)
+    if not send("ping"):
+        sys.exit("The daemon isn't running: systemctl --user start facecam-lock")
+    print("Look at the camera (or hold a photo up to it)...")
+    reply = request_json({"cmd": "guard_test"}, "result", 40)
+    if not reply:
+        sys.exit("No answer from the daemon.")
+    print(reply.get("message"))
+    verdict = reply.get("verdict")
+    if verdict:
+        print("  " + verdict.get("reason", ""))
+    sys.exit(0 if reply.get("ok") else 1)
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "person":
         person_command(sys.argv[2:])
+        return
+    if len(sys.argv) > 1 and sys.argv[1] == "guard":
+        guard_command(sys.argv[2:])
         return
     if len(sys.argv) > 1 and sys.argv[1] == "boot":
         script = BASE_DIR / "scripts" / "boot-unlock.sh"

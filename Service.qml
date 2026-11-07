@@ -452,8 +452,11 @@ Item {
       root.pendingPassword = ""
 
       if (!root.lockRequested) return
-      if (result === PamResult.Success) root.finishUnlock()
-      else root.handlePasswordFailure()
+      if (result === PamResult.Success) {
+        // A typed password ends any anti-spoof lockdown, so face unlock works again.
+        root.faceSend("guard_clear")
+        root.finishUnlock()
+      } else root.handlePasswordFailure()
     }
 
     onError: function(error) {

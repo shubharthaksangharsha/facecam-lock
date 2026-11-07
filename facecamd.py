@@ -28,9 +28,11 @@ import os
 import secrets
 import signal
 import socket
+import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
@@ -44,6 +46,7 @@ from core.avatar import make_avatar
 from core.camera import CameraManager, scale_to_width
 from core.detector import FaceDetector, scale_raw_face
 from core.enroll import Enroller, person_id_for, save_enrollment
+from core.guard import Guard, GuardError, encode_frames, is_fishy, usable
 from core.recognizer import FaceRecognizer
 from core.storage import StorageManager, ensure_runtime_dir, RUNTIME_DIR
 
@@ -51,6 +54,13 @@ SOCKET_PATH = RUNTIME_DIR / "ctl.sock"
 PREVIEW_PATH = RUNTIME_DIR / "preview.jpg"
 STATUS_PATH = RUNTIME_DIR / "status.json"
 TOKEN_PATH = RUNTIME_DIR / "unlock.token"
+LOCKDOWN_PATH = RUNTIME_DIR / "guard.lockdown"
+DATA_DIR = Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "facecam-lock"
+GUARD_LOG = DATA_DIR / "guard.jsonl"
+INTRUDER_DIR = DATA_DIR / "intruders"
+INTRUDER_KEEP = 30
+GUARD_FRAME_GAP = 0.3     # seconds between the frames sent for the check
+GUARD_COLLECT_MAX = 1.4   # never hold the camera longer than this after a match
 
 DETECT_WIDTH = 320
 PREVIEW_QUALITY = 60
@@ -70,7 +80,7 @@ ENROLL_POSES = [
 ENROLL_TIME_LIMIT_SEC = 45.0
 ENROLL_POSE_MAX_SEC = 6.0
 ENROLL_CAPTURE_GAP_SEC = 0.35
-SETTABLE = {"enable_face_unlock": bool, "lock_on_startup": bool}
+SETTABLE = {"enable_face_unlock": bool, "lock_on_startup": bool, "guard_enabled": bool, "guard_fail_closed": bool}
 
 cv2.setNumThreads(max(1, min(4, os.cpu_count() or 1)))
 
@@ -148,6 +158,132 @@ class Hub:
         self.broadcast(msg)
 
 
+class Sentinel:
+    """Second opinion on every unlock, run after the session is already open.
+
+    The unlock never waits for it. If the model says the face was a screen or a
+    print, the session is locked again and face unlock stays off until the
+    password is typed (lockdown)."""
+
+    def __init__(self, hub: Hub, storage):
+        self.hub = hub
+        self.storage = storage
+        self.guard = Guard()
+        self.last = self._read_last()
+        self._busy = threading.Lock()
+
+    @staticmethod
+    def _read_last():
+        try:
+            with open(GUARD_LOG, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                handle.seek(max(0, handle.tell() - 4096))
+                lines = handle.read().decode("utf-8", "ignore").splitlines()
+            return json.loads(lines[-1]) if lines else None
+        except (OSError, ValueError):
+            return None
+
+    def enabled(self, settings=None) -> bool:
+        settings = settings if settings is not None else self.storage.get_settings()
+        return bool(settings.get("guard_enabled")) and self.guard.ready
+
+    @property
+    def lockdown(self) -> bool:
+        return LOCKDOWN_PATH.exists()
+
+    def clear_lockdown(self):
+        try:
+            LOCKDOWN_PATH.unlink()
+            log("lockdown cleared (password unlock)")
+        except FileNotFoundError:
+            pass
+
+    def intruder_count(self) -> int:
+        try:
+            return len(list(INTRUDER_DIR.glob("*.jpg")))
+        except OSError:
+            return 0
+
+    def info(self) -> dict:
+        return {"ready": self.guard.ready, "lockdown": self.lockdown, "last": self.last,
+                "intruders": self.intruder_count()}
+
+    def prewarm(self):
+        self.guard.prewarm()
+
+    # ------------------------------------------------------------------ check
+    def check(self, frames, person: dict, score: float):
+        """Thread entry: encode, ask the model, record, and lock back if it's fishy."""
+        settings = self.storage.get_settings()
+        min_conf = float(settings.get("guard_min_confidence", 0.8))
+        fail_closed = bool(settings.get("guard_fail_closed", False))
+        entry = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "person": person["id"], "score": round(score, 3)}
+        jpegs = []
+        try:
+            if not usable(frames):
+                entry.update(action="skipped", note="frames too dark to judge")
+                return
+            jpegs = encode_frames(frames)
+            verdict = self.guard.verify(jpegs)
+            entry.update(verdict=verdict.as_dict())
+            if is_fishy(verdict, min_conf):
+                entry["action"] = "locked"
+                self._lock_back(jpegs, f"{verdict.attack}: {verdict.reason}")
+            else:
+                entry["action"] = "ok"
+            log(f"guard {entry['action']} live={verdict.live} attack={verdict.attack} "
+                f"conf={verdict.confidence:.2f} via {verdict.model} in {verdict.ms} ms")
+        except GuardError as e:
+            entry.update(action="error", error=str(e)[:200])
+            log(f"guard could not verify: {e}")
+            if fail_closed:
+                entry["action"] = "locked"
+                self._lock_back(jpegs, "the check could not run")
+        except Exception as e:  # never let the check take the daemon down
+            entry.update(action="error", error=repr(e)[:200])
+            log(f"guard crashed: {e!r}")
+        finally:
+            self._record(entry)
+
+    def _record(self, entry: dict):
+        self.last = entry
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            fd = os.open(GUARD_LOG, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            try:
+                os.write(fd, (json.dumps(entry, separators=(",", ":")) + "\n").encode())
+            finally:
+                os.close(fd)
+        except OSError as e:
+            log(f"guard log failed: {e}")
+        self.hub.broadcast({"t": "guard", **self.info()})
+
+    def _lock_back(self, jpegs, why: str):
+        """Lock first, document second."""
+        write_atomic(LOCKDOWN_PATH, b"1\n")
+        try:
+            TOKEN_PATH.unlink()
+        except FileNotFoundError:
+            pass
+        subprocess.Popen(["omarchy-shell", "lock", "lock"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        log(f"LOCKED BACK: {why}")
+        try:
+            INTRUDER_DIR.mkdir(parents=True, exist_ok=True)
+            os.chmod(INTRUDER_DIR, 0o700)
+            if jpegs:
+                write_atomic(INTRUDER_DIR / f"{time.strftime('%Y%m%d-%H%M%S')}.jpg", jpegs[len(jpegs) // 2], 0o600)
+            for old in sorted(INTRUDER_DIR.glob("*.jpg"))[:-INTRUDER_KEEP]:
+                old.unlink()
+        except OSError as e:
+            log(f"evidence save failed: {e}")
+        try:
+            subprocess.run(["notify-send", "-u", "critical", "-a", "FaceCam Lock", "Face unlock was fooled?",
+                            f"Locked again: {why}. Type your password to unlock."], timeout=3,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
 class Scanner:
     def __init__(self, hub: Hub):
         self.hub = hub
@@ -155,6 +291,7 @@ class Scanner:
         self.detector = FaceDetector()
         self.recognizer = FaceRecognizer()
         self.camera = CameraManager()
+        self.sentinel = Sentinel(hub, self.storage)
         self.lock = threading.Lock()
         self.thread = None
         self.cancel = threading.Event()
@@ -281,6 +418,16 @@ class Scanner:
             self.hub.status(state="no_profile", message="Can't detect face", require_password=True, **base)
             return
 
+        if self.sentinel.lockdown:
+            # The last unlock looked fake. Only the password gets in until it is typed.
+            self.hub.status(state="failed", message="Face unlock paused. Type your password",
+                            require_password=True, **base)
+            return "failed"
+
+        guard_on = self.sentinel.enabled(settings)
+        if guard_on:
+            threading.Thread(target=self.sentinel.prewarm, daemon=True).start()  # TLS ready before the match
+
         while not cancel.is_set():
             # Hold the camera closed while the lid is shut; start the instant it opens.
             if lid_closed():
@@ -348,12 +495,19 @@ class Scanner:
                         if matched:
                             who = person["display_name"]
                             log(f"match {person['id']} score={score:.3f} after {(time.perf_counter() - t_open) * 1000:.0f} ms")
-                            self.camera.stop(force=True)
                             # Each person's photo is shown only for that person.
                             self.hub.status(**{**base, "state": "matched", "message": f"Welcome back {who}",
                                                "display_name": who, "person": person["id"],
                                                "avatar": person["avatar"] or "", "score": round(score, 4)})
                             write_atomic(TOKEN_PATH, f"{secrets.token_hex(16)} {time.time():.3f}\n".encode())
+                            # The unlock is already on its way. Everything below is the async check.
+                            frames = [frame]
+                            if guard_on:
+                                frames = self._guard_frames(cancel, frame, seq, int(settings.get("guard_frames", 3)))
+                            self.camera.stop(force=True)
+                            if guard_on:
+                                threading.Thread(target=self.sentinel.check, args=(frames, person, score),
+                                                 daemon=True, name="guard-check").start()
                             return "matched"
 
                 if deadline is not None and now > deadline:
@@ -369,6 +523,52 @@ class Scanner:
 
             if not restart:
                 return
+
+    def _guard_frames(self, cancel: threading.Event, first, seq: int, count: int):
+        """The matched frame plus a few more over ~0.6 s: movement is the best tell between a
+        person and a picture of one. Runs after the token is written, so it costs the unlock nothing."""
+        frames = [first]
+        last = time.monotonic()
+        stop_at = last + GUARD_COLLECT_MAX
+        while len(frames) < max(1, count) and not cancel.is_set() and time.monotonic() < stop_at:
+            seq, frame = self.camera.wait_frame(seq, timeout=0.2)
+            now = time.monotonic()
+            if frame is not None and now - last >= GUARD_FRAME_GAP:
+                frames.append(frame)
+                last = now
+        return frames
+
+    def guard_test(self) -> dict:
+        """Run the check on live camera frames without unlocking anything."""
+        sentinel = self.sentinel
+        if not sentinel.guard.ready:
+            return {"ok": False, "message": "No Gemini key. Run: facecam-lock guard setup"}
+        if self.scanning:
+            return {"ok": False, "message": "Busy. Try again in a moment"}
+        settings = self.storage.get_settings()
+        if not self._open_camera(int(settings.get("camera_index", 0))):
+            return {"ok": False, "message": "Couldn't open the camera"}
+        frames = []
+        try:
+            seq, t0, last = 0, time.monotonic(), 0.0
+            while len(frames) < int(settings.get("guard_frames", 3)) and time.monotonic() - t0 < 6:
+                seq, frame = self.camera.wait_frame(seq, timeout=0.3)
+                now = time.monotonic()
+                if frame is not None and float(frame.mean()) >= 28 and now - last >= GUARD_FRAME_GAP and now - t0 > 1.0:
+                    frames.append(frame)
+                    last = now
+        finally:
+            self.camera.stop(force=True)
+        if not frames:
+            return {"ok": False, "message": "The camera image is too dark to check"}
+        try:
+            verdict = sentinel.guard.verify(encode_frames(frames))
+        except GuardError as e:
+            return {"ok": False, "message": f"Check failed: {str(e)[:90]}"}
+        fishy = is_fishy(verdict, float(settings.get("guard_min_confidence", 0.8)))
+        what = "Would lock again" if fishy else "Looks like a live person"
+        return {"ok": True, "message": f"{what} ({verdict.attack}, {verdict.confidence:.0%}, {verdict.ms / 1000:.1f} s)",
+                "verdict": verdict.as_dict()}
 
     # ---------------------------------------------------------------- enrollment
     def _enroll_msg(self, **fields):
@@ -484,6 +684,7 @@ class Scanner:
                         "samples": len(p["profile"].get("exemplars", [])), "avatar": p["avatar"] or ""}
                        for p in self.storage.list_people()],
             "settings": {key: bool(settings.get(key, False)) for key in SETTABLE},
+            "guard": self.sentinel.info(),
         }
 
     def manage(self, req: dict) -> dict:
@@ -528,8 +729,20 @@ class Scanner:
             key = req.get("key")
             if key not in SETTABLE:
                 return {"ok": False, "message": "Unknown setting"}
+            if key == "guard_enabled" and req.get("value"):
+                self.sentinel.guard.reload()
+                if not self.sentinel.guard.ready:
+                    return {"ok": False, "message": "Add a Gemini key first: facecam-lock guard setup"}
             storage.save_settings({key: SETTABLE[key](req.get("value"))})
             return {"ok": True, "message": ""}
+        if cmd == "guard_test":
+            return self.guard_test()
+        if cmd == "guard_clear":
+            self.sentinel.clear_lockdown()
+            return {"ok": True, "message": ""}
+        if cmd == "guard_reload":
+            self.sentinel.guard.reload()
+            return {"ok": True, "message": "Reloaded"}
         return {"ok": False, "message": "Unknown command"}
 
 
@@ -556,6 +769,8 @@ class Server:
                         self.scanner.stop()
                     elif cmd == "status":
                         self.hub.broadcast(self.hub.last_status)
+                    elif cmd == "guard_clear":
+                        self.scanner.sentinel.clear_lockdown()
                     elif cmd == "ping":
                         conn.sendall(b'{"t":"pong"}\n')
         except OSError:

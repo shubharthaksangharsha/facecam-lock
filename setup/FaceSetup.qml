@@ -35,6 +35,7 @@ Item {
 
   property var people: []
   property var settings: ({})
+  property var guard: ({})
   property bool loaded: false
   property string notice: ""
   property bool noticeError: false
@@ -143,8 +144,11 @@ Item {
     if (msg.t === "people") {
       root.people = msg.people || []
       root.settings = msg.settings || ({})
+      root.guard = msg.guard || ({})
       root.loaded = true
       root.avatarVersion += 1
+    } else if (msg.t === "guard") {
+      root.guard = msg
     } else if (msg.t === "frame") {
       if (root.page !== "enroll") return
       root.faceBox = msg.face || null
@@ -162,6 +166,7 @@ Item {
       root.notice = msg.message || ""
       root.noticeError = !msg.ok
       if (msg.cmd === "enroll" && !msg.ok) root.enrollState = "error"
+      if (msg.cmd === "set" && !msg.ok) send({ cmd: "people" })  // put the toggle back
       if (msg.ok && (msg.cmd === "photo" || msg.cmd === "remove" || msg.cmd === "rename")) enterHome()
     }
   }
@@ -319,6 +324,19 @@ Item {
     next[key] = value
     root.settings = next
     send({ cmd: "set", key: key, value: value })
+  }
+
+  function guardSummary() {
+    var g = root.guard || ({})
+    if (g.lockdown) return "Locked back after a suspicious unlock. Type your password to resume face unlock"
+    if (!g.ready) return "Gemini double-checks each unlock is a live face. Needs a key: facecam-lock guard setup"
+    var last = g.last
+    if (!last) return "Gemini double-checks each unlock in the background and locks again if it was a photo or screen"
+    var v = last.verdict
+    if (last.action === "locked") return "Last check locked the session again" + (v ? " (" + v.attack + ")" : "")
+    if (last.action === "ok" && v) return "Last unlock checked: live person, " + Math.round(v.confidence * 100) + "% sure, " + (v.ms / 1000).toFixed(1) + " s"
+    if (last.action === "error") return "Last check couldn't run, so it was skipped"
+    return "Last check skipped: " + (last.note || "")
   }
 
   function fileUrl(path, version) {
@@ -760,6 +778,44 @@ Item {
                 : "Locks right after login. Turn on with disk unlock at boot, or you'll get both prompts"
               checked: root.settings.lock_on_startup === true
               onToggled: root.setSetting("lock_on_startup", !checked)
+            }
+
+            SettingRow {
+              title: "Anti-spoof check"
+              detail: root.guardSummary()
+              checked: root.settings.guard_enabled === true
+              onToggled: root.setSetting("guard_enabled", !checked)
+            }
+
+            Item {
+              visible: root.settings.guard_enabled === true
+              width: parent.width
+              height: guardTestButton.implicitHeight
+              Text {
+                anchors.left: parent.left
+                anchors.right: guardTestButton.left
+                anchors.rightMargin: Style.space(12)
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Hold a phone with your photo up to the camera to see it get caught"
+                elide: Text.ElideRight
+                color: root.muted
+                font.family: Style.font.family
+                font.pixelSize: Style.font.bodySmall
+              }
+              Button {
+                id: guardTestButton
+                anchors.right: parent.right
+                text: "Check now"
+                iconText: "󰄀"
+                bordered: true
+                foreground: root.fg
+                accent: root.accent
+                onClicked: {
+                  root.noticeError = false
+                  root.notice = "Checking…"
+                  root.send({ cmd: "guard_test" })
+                }
+              }
             }
 
             Item {

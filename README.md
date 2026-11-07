@@ -99,6 +99,52 @@ disk-password prompt.
 Limine snapshot entries still work. If a rebuild goes wrong, boot an older
 snapshot and run `facecam-lock boot disable`.
 
+## Anti-spoof guard (optional, uses Gemini)
+
+A face matcher can't tell you **whose** face it is *and* whether that face is
+really in front of the camera. Someone holding up a photo of you on a phone
+can fool it. The guard is a second opinion that never slows the unlock:
+
+1. The face matches, the session unlocks, exactly as before.
+2. In the background the daemon sends the matched frame plus two more taken
+   over ~0.6 s to a Gemini vision model: *live person, or a screen / print /
+   mask?*
+3. If the answer is "not live" with at least 80% confidence, the session is
+   **locked again**, the face unlock is **paused until you type your password**,
+   a desktop notification fires, and a photo of what was in front of the camera
+   is saved to `~/.local/share/facecam-lock/intruders/`.
+
+```bash
+facecam-lock guard setup --from ~/.env          # reads GEMINI_API_KEYS / GEMINI_API_KEY
+facecam-lock guard setup --key AIza...          # or pass keys directly (repeatable)
+facecam-lock guard test                         # try it on the camera (hold up a phone!)
+facecam-lock guard test --image a.jpg b.jpg     # or on pictures, no camera needed
+facecam-lock guard status | log | on | off | clear
+```
+
+The same switch is in **Setup → Security → Face Unlock → Anti-spoof check**,
+with a **Check now** button and the result of the last unlock.
+
+- **Keys** are stored in `~/.config/facecam-lock/guard.env` (mode 600), never in
+  this repo. Several keys are rotated automatically when one hits its quota.
+- **Models.** Benchmarked on live and spoofed frames: `gemini-3.5-flash` was
+  right every time, `gemini-3-flash-preview` is about a second quicker and also
+  right, and the flash-lite models false-alarmed or timed out. The chain is
+  `gemini-3.5-flash → gemini-3-flash-preview → gemini-3.5-flash-lite`; when the
+  first is slow (2.5 s) the next is started alongside it and the first answer
+  wins. Override with `GUARD_MODELS=a,b,c` in `guard.env`. Expect a verdict in
+  2-4 s, so a fake gets about that long at the desktop.
+- **Fails open by default.** No network, no quota, or a dark image means the
+  unlock stands and the check is logged as skipped. Set `"guard_fail_closed":
+  true` in `config.json` to lock back instead.
+- **Tuning** in `config.json`: `guard_min_confidence` (default 0.8),
+  `guard_frames` (default 3).
+- **Privacy.** With the guard on, those three frames (640 px wide JPEGs, ~100 KB
+  total) leave your machine for Google's Gemini API on every face unlock. Leave
+  it off if that is not acceptable. Nothing is sent when it is off.
+- **Not a guarantee.** It catches phones, screens and prints. A good 3D mask or
+  a very good video may still pass. Treat it as one more layer.
+
 ## How it works
 
 ```
@@ -120,6 +166,9 @@ snapshot and run `facecam-lock boot disable`.
   (`CLOCK_BOOTTIME` vs `CLOCK_MONOTONIC`).
 - **Push, don't poll.** Status and frames over a Unix socket; previews on
   tmpfs, double-buffered.
+- **Unlock first, check second.** The camera is released *after* the token is
+  written, and the anti-spoof call runs on its own thread over a TLS connection
+  that was opened when the scan started.
 - **Fast PAM path.** `pam_helper.py` is stdlib-only (~10 ms start, ~25 ms
   after a match).
 - **Cheap per frame.** Detect at 320 px, recognise the full-resolution face,
@@ -131,7 +180,7 @@ frame after power-on.
 ## Security notes
 
 Face unlock is a convenience, not a strong factor. A good photo of you may
-pass, and any process running as your user can write the unlock token. Keep a
+pass (the anti-spoof guard above narrows that gap), and any process running as your user can write the unlock token. Keep a
 strong password and treat this like fingerprint unlock. The token must be
 owned by you, not writable by anyone else, and less than 15 s old; it is
 deleted when used.

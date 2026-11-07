@@ -14,3 +14,7 @@ models/*.onnx
 
 # Leftover frontend tooling from older versions
 node_modules/
+
+# Never commit secrets
+*.env
+guard.env

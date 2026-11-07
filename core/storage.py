@@ -39,6 +39,10 @@ DEFAULT_SETTINGS = {
     "enable_lid_open_trigger": True,
     "show_camera_preview_on_lock": True,
     "lock_on_startup": False,
+    "guard_enabled": False,
+    "guard_min_confidence": 0.8,
+    "guard_fail_closed": False,
+    "guard_frames": 3,
     "display_name": "",
 }
 
